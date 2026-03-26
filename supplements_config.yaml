@@ -1,0 +1,191 @@
+# Auto_Nutrition Local Config - 补剂与常驻食物库
+# 包含丰富的中西方高频饮食、多国特色菜肴及运动补剂标准库，用于作为 LLM 识别的基准锚点（Anchor），防止幻觉。
+
+supplements:
+  # --- 基础与恢复补剂 ---
+  maurten_100:
+    name: "Maurten Gel 100 (Energy Gel)"
+    calories: 100
+    macros: { carbs: 25, protein: 0, fat: 0 }
+    aliases: ["能量胶", "补给胶", "马丁胶"]
+  electrolytes_tablet:
+    name: "Electrolyte Tab / Salt Pill (盐丸/无糖泡腾片)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["盐丸", "电解质片", "电解质冲剂"]
+  # --- 精准运动功能饮料与补剂 ---
+  gatorade_600ml:
+    name: "Gatorade (佳得乐运动饮料 600ml)"
+    calories: 156
+    macros: { carbs: 39, protein: 0, fat: 0 }
+    aliases: ["佳得乐", "gatorade"]
+  pocari_sweat_500ml:
+    name: "Pocari Sweat (宝矿力水特 500ml)"
+    calories: 135
+    macros: { carbs: 33, protein: 0, fat: 0 }
+    aliases: ["宝矿力", "宝矿力水特", "pocari"]
+  red_bull_250ml:
+    name: "Red Bull (红牛金罐 250ml)"
+    calories: 140
+    macros: { carbs: 34, protein: 1, fat: 0 }
+    aliases: ["红牛", "red bull"]
+  monster_energy_330ml:
+    name: "Monster Energy (魔爪原味 330ml)"
+    calories: 160
+    macros: { carbs: 40, protein: 0, fat: 0 }
+    aliases: ["魔爪", "monster"]
+  monster_ultra_330ml:
+    name: "Monster Ultra (魔爪零糖白罐 330ml)"
+    calories: 10
+    macros: { carbs: 3, protein: 0, fat: 0 }
+    aliases: ["白魔爪", "零糖魔爪"]
+  maurten_drink_160:
+    name: "Maurten Drink Mix 160 (1 包)"
+    calories: 160
+    macros: { carbs: 39, protein: 0, fat: 0 }
+    aliases: ["马丁冲剂", "maurten 160"]
+  whey_protein_1scoop:
+    name: "Whey Protein Concentrate (乳清蛋白粉 1 Scoop)"
+    calories: 120
+    macros: { carbs: 3, protein: 24, fat: 1.5 }
+    aliases: ["蛋白粉", "乳清蛋白"]
+  whey_isolate_1scoop:
+    name: "Whey Protein Isolate (分离乳清 1 Scoop)"
+    calories: 110
+    macros: { carbs: 1, protein: 25, fat: 0.5 }
+    aliases: ["分离乳清", "分离蛋白"]
+  creatine_5g:
+    name: "Creatine Monohydrate (一水肌酸 5g)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["肌酸"]
+  bcaa_powder:
+    name: "BCAA Powder (支链氨基酸软糖/粉)"
+    calories: 20
+    macros: { carbs: 1, protein: 4, fat: 0 }
+  fish_oil_1cap:
+    name: "Fish Oil (鱼油 1 Capsule)"
+    calories: 10
+    macros: { carbs: 0, protein: 0, fat: 1.0 }
+
+regional_foods:
+  # ==============================
+  # 🇨🇳 胶东海鲜 & 鲁菜 (Jiaodong)
+  # ==============================
+  bayu_dumplings:
+    name: "Mackerel Dumplings (胶东鲅鱼水饺 10只)"
+    calories: 550
+    macros: { carbs: 55, protein: 35, fat: 22 }
+    aliases: ["鲅鱼饺子", "鲅鱼水饺"]
+  braised_sea_cucumber:
+    name: "Braised Sea Cucumber with Scallions (葱烧海参 1份)"
+    calories: 180
+    macros: { carbs: 8, protein: 25, fat: 5 }
+    aliases: ["葱烧海参"]
+  shanghai_hong_shao_rou:
+    name: "Shanghai Red Braised Pork (本帮红烧肉 150g)"
+    calories: 580
+    macros: { carbs: 25, protein: 15, fat: 45 }
+    aliases: ["红烧肉"]
+
+  # ==============================
+  # 🇨🇳 潮汕料理 (Teochew)
+  # ==============================
+  teochew_beef_hotpot_lean:
+    name: "Teochew Beef Hotpot Lean Cut (吊龙/嫩肉 100g)"
+    calories: 160
+    macros: { carbs: 0, protein: 22, fat: 8 }
+    aliases: ["吊龙", "嫩肉"]
+  teochew_beef_hotpot_fatty:
+    name: "Teochew Beef Hotpot Fatty Cut (肥胼/胸口朥 100g)"
+    calories: 320
+    macros: { carbs: 0, protein: 16, fat: 28 }
+    aliases: ["肥胼", "胸口朥"]
+  marinated_goose:
+    name: "Teochew Marinated Goose (潮汕卤鹅 100g)"
+    calories: 280
+    macros: { carbs: 3, protein: 18, fat: 20 }
+    aliases: ["卤鹅", "狮头鹅"]
+
+  # ==============================
+  # 🇮🇹 意大利料理 (Italian)
+  # ==============================
+  margherita_pizza:
+    name: "Margherita Pizza (玛格丽特披萨 1/4块)"
+    calories: 320
+    macros: { carbs: 30, protein: 14, fat: 16 }
+    aliases: ["玛格丽特"]
+  carbonara_pasta:
+    name: "Traditional Carbonara (意式卡邦尼面 1份)"
+    calories: 550
+    macros: { carbs: 55, protein: 25, fat: 30 }
+    aliases: ["卡邦尼", "培根蛋面"]
+
+  # ==============================
+  # 🇯🇵 日本料理 (Japanese)
+  # ==============================
+  salmon_sashimi:
+    name: "Salmon Sashimi (三文鱼刺身 5片/100g)"
+    calories: 200
+    macros: { carbs: 0, protein: 20, fat: 13 }
+    aliases: ["三文鱼刺身", "刺身"]
+  tonkotsu_ramen:
+    name: "Tonkotsu Ramen (豚骨拉面 1碗)"
+    calories: 750
+    macros: { carbs: 80, protein: 30, fat: 35 }
+    aliases: ["豚骨拉面", "日式拉面"]
+
+  # ==============================
+  # 🛒 山姆会员店 (Sam's Club)
+  # ==============================
+  sam_rotisserie_chicken:
+    name: "Sam's Club Rotisserie Chicken (山姆烤鸡 100g)"
+    calories: 152
+    macros: { carbs: 1, protein: 22, fat: 7 }
+    aliases: ["山姆烤鸡", "美式烤鸡"]
+  sam_swiss_roll:
+    name: "Sam's Club Swiss Roll (山姆瑞士卷 1个切片)"
+    calories: 217
+    macros: { carbs: 17, protein: 5, fat: 14 }
+    aliases: ["山姆瑞士卷", "瑞士卷"]
+  sam_beef_roll:
+    name: "Sam's Club Beef Roll (山姆牛肉卷 1个)"
+    calories: 810
+    macros: { carbs: 86, protein: 45, fat: 32 }
+    aliases: ["山姆牛肉卷", "牛肉卷"]
+  sam_beef_shank:
+    name: "Sam's Club Braised Beef Shank (山姆卤汁牛腱 100g)"
+    calories: 154
+    macros: { carbs: 1.4, protein: 29.4, fat: 3.3 }
+    aliases: ["山姆牛腱", "卤汁牛腱"]
+  sam_pork_jerky:
+    name: "Sam's Club Pork Jerky (山姆猪肉脯 100g)"
+    calories: 348
+    macros: { carbs: 33.4, protein: 34.9, fat: 8 }
+    aliases: ["山姆猪肉脯", "猪肉脯"]
+  sam_chicken_breast_parsley:
+    name: "Sam's Club Parsley Chicken Breast (欧芹低脂鸡里脊 100g)"
+    calories: 110
+    macros: { carbs: 1, protein: 23, fat: 1.5 }
+    aliases: ["欧芹鸡肉", "欧芹鸡里脊"]
+  sam_mixed_nuts:
+    name: "Sam's Club Mixed Nuts (山姆混合坚果 28g)"
+    calories: 170
+    macros: { carbs: 6, protein: 6, fat: 15 }
+    aliases: ["山姆坚果", "混合坚果"]
+
+  # ==============================
+  # 其他常驻食物
+  # ==============================
+  taiwan_lu_rou_fan:
+    name: "Taiwanese Braised Pork Rice (台湾卤肉饭)"
+    calories: 550
+    macros: { carbs: 65, protein: 18, fat: 24 }
+  beef_noodles:
+    name: "Taiwanese Beef Noodles (台湾牛肉面)"
+    calories: 650
+    macros: { carbs: 85, protein: 35, fat: 18 }
+  xiaolongbao_6pcs:
+    name: "Xiaolongbao (小笼包 6只)"
+    calories: 360
+    macros: { carbs: 42, protein: 14, fat: 18 }
