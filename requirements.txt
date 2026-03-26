@@ -1,0 +1,11 @@
+# Core MCP SDK
+mcp[cli]
+
+# MyFitnessPal Integration
+myfitnesspal
+
+# Utility
+python-dotenv
+PyYAML
+requests
+loguru
