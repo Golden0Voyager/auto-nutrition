@@ -1,49 +1,63 @@
-# Auto_Nutrition MCP Server
+# 🍎 Auto_Nutrition MCP Server
+> **AI-Powered Nutrition & Performance Hub for High-Performance Athletes.**
 
-Auto_Nutrition 是一个基于 **Model Context Protocol (MCP)** 的智能微服务。它可以让你直接在 Claude Desktop 或其它支持 MCP 的客户端里，通过自然语言或发送食物图片，自动估算热量及三大宏量营养素 (碳水/蛋白质/脂肪)，并**无感静默写入到你的 MyFitnessPal** 账号中。
+`Auto_Nutrition` 是一套基于 **Model Context Protocol (MCP)** 的智能营养分析与运动中枢。它不仅是 MyFitnessPal 的“语音助手”，更是您的“专业营养记录官”。通过大语言模型的高效理解力，它让记录从繁琐的“搜、点、输、存”缩短为一句话、一张图、甚至一个念头。
 
-## 🌟 核心功能
+---
 
-- **自然语言录入饮食**："我今天晚餐吃了一碗米饭和一份西红柿炒鸡蛋" -> 自动拆解并记录为 MyFitnessPal 日常日记。
-- **图片识食**：直接发送饭菜照片，大模型会自动估算重量和热量等指标。
-- **智能纠偏**：通过本地 `supplements_config.yaml` 锁定常驻补剂（如蛋白粉、能量胶）与地域饮食的营养数值，防止大模型发生幻觉或估算失真。
-- **体重跟踪**：支持自然语言直接打卡体重数据。
-- **健康查户口**：随时询问当日的热量摄入和营养素结构汇总。
+## ✨ 为什么选择它？ (The Experience)
 
-## ⚡ 快速接入指南 (小白友好)
+### 🌿 极致优雅的记录逻辑
+**过去**：打开 App -> 点击 "+" -> 搜索 -> 筛选 -> 输入分量 -> 保存。(耗时 30秒)
+**现在**：对着 Siri/Claude 说句：“**午饭吃了两百克鸡胸肉和一根香蕉。**” (耗时 2秒)
+*   **智能拆解**：自动提取重量、热量及微量元素（钠、钾、钙等）。
+*   **锚点校准**：通过本地 `supplements_config.yaml` 锁定常驻补剂数据，杜绝 AI 幻觉。
 
-本项目默认支持最新的 `uv` 包管理器调用。请按照以下三个步骤进行配置：
+### 🏃 专业跑者的“马拉松模式”
+针对马拉松运动员 (Marathon Training) 深度定制：
+*   **运动同步**：支持同步心率、配速、热量消耗。
+*   **营养监控**：实时分析“钠钾平衡”防止水肿，追踪蛋白质确保肌肉修复。
+*   **缺口补位**：问一句：“**今天跑了20k，晚餐还差多少蛋白质达标？**” AI 结合当日数据给出策略。
 
-### 第一步：获取 MyFitnessPal 的 Cookie
+### 🪄 主动式补剂管家
+*   **时间感知**：记录晚餐后，AI 会主动询问：“**晚餐已录入。需要顺便记录您的‘晚间补剂’包吗？**”
+*   **容错自由**：不小心录错了？直接说：“**撤回刚才的记录**” 或者 “**删掉今天的晚餐**”。
 
-由于 MyFitnessPal 官方未开放 V2 API 权限，我们需要让 MCP 接管你的网页端登录态：
+---
 
-1. 在电脑浏览器（推荐 Chrome/Edge）中登录 [MyFitnessPal 官网](https://www.myfitnesspal.com/)。
-2. 登录成功后，使用任意 Cookie 导出插件（例如 [EditThisCookie](https://chromewebstore.google.com/detail/editthiscookie/fngmhnnpilhplaeedifhccceomclgfbg) 或直接按 F12 抓取）。将所有域下面的 cookie 导出为 JSON 数组格式。
-3. 将导出的 Cookie 文本保存为名为 `cookies.json` 的文件。
-4. 将 `cookies.json` 放置在与本项目的 `mfp_adapter.py` 同级的根目录下。
+## 🔥 功能矩阵 (Feature Matrix)
 
-*⚠️ 隐私警告：此文件等同于你的账号密码，**绝对不要**将其上传或分享给他人。本项目 `.gitignore` 已默认屏蔽此文件上传。*
+| 功能 | 交互示例 | 价值 |
+| :--- | :--- | :--- |
+| **精准识食** | “刚才吃了两个肉包子，一碗粥” | 自动换算常见地域食物及分量 |
+| **运动打卡** | “跑了 10 公里，配速 5:30” | 自动计算有氧时长与热量消耗 |
+| **趋势洞察** | “帮我分析下最近一月的营养趋势” | 抓取 7 天以上数据，监控钠/蛋白偏离度 |
+| **点餐补位** | “蛋白还差 40g，推荐个补位晚餐” | 检索本地高频食物库，给出最优配比建议 |
+| **底层自愈** | “登录过期了，重置一下” | **内置浏览器助手**，无需手动导出 Cookie |
 
-### 第二步：(可选) 自定义补剂配置
+---
 
-项目根目录自带了一个 `supplements_config.yaml` 示例。建议使用任何文本编辑器打开它，把你经常吃的“蛋白粉”、“左旋肉碱”或者是带有明确营养标签的“便利店三明治”的热量固定下来。大模型在匹配到这些核心词汇时，会**强制使用你配置的精准热量**，保证长期数据的严谨度。
+## 🛠️ 快速起步
 
-### 第三步：配置 Claude Desktop
+1.  **安装环境**：推荐使用 [uv](https://astral.sh/uv) 管理。
+2.  **配置 Auth**：在根目录下放入 `cookies.json`。
+    *   *Tip*: 可调用 `refresh_login` 工具通过弹窗直接登录抓取。
+3.  **自定义补剂**：修改 `supplements_config.yaml` 打造您的个人营养包。
+4.  **挂载 Claude**：在 `claude_desktop_config.json` 中配置本项目。
 
-现在，让我们把这个 Server 对接到你的 Claude Desktop 里！
+---
 
-#### 1. 找到 Claude 的配置文件
-- **Mac**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+## 🌎 国际化标准
+本项目所有工具及参数均支持 **中英双语 (Bilingual)** 描述，无论您使用中文还是英文与 Claude 沟通，系统都能提供最精准的工具调用建议。
 
-*(如果文件不存在，请手动新建它及其父文件夹)*
+---
+*Designed for performance. Engineered for simplicity.*
+父文件夹)*
 
 #### 2. 添加 Auto_Nutrition 挂载节点
 打开那个配置文件，在根目录的 `mcpServers` 节点下增加以下配置：
 
 **如果你选择将本包通过远端 GitHub URL 挂载 (免本地克隆)：**
-```json
 {
   "mcpServers": {
     "auto-nutrition": {

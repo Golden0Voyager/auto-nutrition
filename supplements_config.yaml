@@ -12,198 +12,141 @@ supplements:
     name: "Electrolyte Tab / Salt Pill (盐丸/无糖泡腾片)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
+    micros: { sodium: 300, potassium: 150 }
     aliases: ["盐丸", "电解质片", "电解质冲剂"]
   # --- 精准运动功能饮料与补剂 ---
   gatorade_600ml:
     name: "Gatorade (佳得乐运动饮料 600ml)"
     calories: 156
     macros: { carbs: 39, protein: 0, fat: 0 }
+    micros: { sodium: 270, potassium: 75 }
     aliases: ["佳得乐", "gatorade"]
   pocari_sweat_500ml:
     name: "Pocari Sweat (宝矿力水特 500ml)"
     calories: 135
     macros: { carbs: 33, protein: 0, fat: 0 }
+    micros: { sodium: 245, potassium: 100 }
     aliases: ["宝矿力", "宝矿力水特", "pocari"]
-  red_bull_250ml:
-    name: "Red Bull (红牛金罐 250ml)"
-    calories: 140
-    macros: { carbs: 34, protein: 1, fat: 0 }
-    aliases: ["红牛", "red bull"]
-  monster_energy_330ml:
-    name: "Monster Energy (魔爪原味 330ml)"
-    calories: 160
-    macros: { carbs: 40, protein: 0, fat: 0 }
-    aliases: ["魔爪", "monster"]
-  monster_ultra_330ml:
-    name: "Monster Ultra (魔爪零糖白罐 330ml)"
-    calories: 10
-    macros: { carbs: 3, protein: 0, fat: 0 }
-    aliases: ["白魔爪", "零糖魔爪"]
-  maurten_drink_160:
-    name: "Maurten Drink Mix 160 (1 包)"
-    calories: 160
-    macros: { carbs: 39, protein: 0, fat: 0 }
-    aliases: ["马丁冲剂", "maurten 160"]
+  # --- 专业补剂 ---
   whey_protein_1scoop:
     name: "Whey Protein Concentrate (乳清蛋白粉 1 Scoop)"
     calories: 120
     macros: { carbs: 3, protein: 24, fat: 1.5 }
+    micros: { calcium: 2 }
     aliases: ["蛋白粉", "乳清蛋白"]
-  whey_isolate_1scoop:
-    name: "Whey Protein Isolate (分离乳清 1 Scoop)"
-    calories: 110
-    macros: { carbs: 1, protein: 25, fat: 0.5 }
-    aliases: ["分离乳清", "分离蛋白"]
-  creatine_5g:
-    name: "Creatine Monohydrate (一水肌酸 5g)"
-    calories: 0
-    macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["肌酸"]
-  bcaa_powder:
-    name: "BCAA Powder (支链氨基酸软糖/粉)"
-    calories: 20
-    macros: { carbs: 1, protein: 4, fat: 0 }
   fish_oil_1cap:
     name: "Fish Oil (鱼油 1 Capsule)"
     calories: 10
-    macros: { carbs: 0, protein: 0, fat: 1.0 }
+    macros: { carbs: 0, protein: 0, fat: 1.1 }
+    aliases: ["鱼油"]
+  beetroot_powder:
+    name: "Beetroot Powder (甜菜根粉 1份)"
+    calories: 35
+    macros: { carbs: 8, protein: 1, fat: 0 }
+    micros: { sugar: 6, potassium: 250 }
+    aliases: ["甜菜根粉", "甜菜根"]
+  calcium_pill:
+    name: "Calcium Supplement (钙片 1片)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    micros: { calcium: 100 }
+    aliases: ["钙片"]
+  magnesium_pill:
+    name: "Magnesium [M] (镁 200mg)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["镁片"]
+  curcumin_pill:
+    name: "Curcumin [M] (姜黄素 500mg)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["姜黄素"]
+  glucosamine_pill:
+    name: "Glucosamine [M] (氨糖 1500mg)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["氨糖", "氨糖软骨素"]
+  vitamin_b_complex:
+    name: "Vitamin B Complex (高剂量 B族)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["维生素B", "VB"]
 
 regional_foods:
-  # ==============================
-  # 🇨🇳 胶东海鲜 & 鲁菜 (Jiaodong)
-  # ==============================
   bayu_dumplings:
     name: "Mackerel Dumplings (胶东鲅鱼水饺 10只)"
     calories: 550
     macros: { carbs: 55, protein: 35, fat: 22 }
-    aliases: ["鲅鱼饺子", "鲅鱼水饺"]
-  braised_sea_cucumber:
-    name: "Braised Sea Cucumber with Scallions (葱烧海参 1份)"
-    calories: 180
-    macros: { carbs: 8, protein: 25, fat: 5 }
-    aliases: ["葱烧海参"]
+    micros: { sodium: 850 }
   shanghai_hong_shao_rou:
     name: "Shanghai Red Braised Pork (本帮红烧肉 150g)"
     calories: 580
     macros: { carbs: 25, protein: 15, fat: 45 }
-    aliases: ["红烧肉"]
+    micros: { sugar: 15, sodium: 600 }
+  
+common_foods:
+  milk_full_cream_300ml:
+    name: "Milk (Full Cream, 300ml - 一份)"
+    calories: 180
+    macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
+    micros: { calcium: 30, potassium: 450, sodium: 120, cholesterol: 30 }
+    aliases: ["牛奶", "全脂牛奶", "Milk", "Full Cream Milk", "一份牛奶"]
+  apple_medium:
+    name: "Apple (Red/Green, Medium)"
+    calories: 95
+    macros: { protein: 0.5, carbs: 25, fat: 0.3 }
+    micros: { fiber: 4.5, vitamin_c: 14, potassium: 195 }
+    aliases: ["苹果", "Apple", "中等苹果"]
 
-  # ==============================
-  # 🇨🇳 潮汕料理 (Teochew)
-  # ==============================
-  teochew_beef_hotpot_lean:
-    name: "Teochew Beef Hotpot Lean Cut (吊龙/嫩肉 100g)"
-    calories: 160
-    macros: { carbs: 0, protein: 22, fat: 8 }
-    aliases: ["吊龙", "嫩肉"]
-  teochew_beef_hotpot_fatty:
-    name: "Teochew Beef Hotpot Fatty Cut (肥胼/胸口朥 100g)"
-    calories: 320
-    macros: { carbs: 0, protein: 16, fat: 28 }
-    aliases: ["肥胼", "胸口朥"]
-  marinated_goose:
-    name: "Teochew Marinated Goose (潮汕卤鹅 100g)"
-    calories: 280
-    macros: { carbs: 3, protein: 18, fat: 20 }
-    aliases: ["卤鹅", "狮头鹅"]
+routines:
+  morning_stack:
+    name: "晨补 (Morning Stack)"
+    aliases: ["晨间补剂", "晨间活力包", "早上的补剂", "早起补剂", "晨补", "补剂"]
+    items:
+      - { name: "Vitamin B Complex (高剂量 B族)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Glucosamine [M] (氨糖 1500mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "鱼油", calories: 10, macros: { carbs: 0, protein: 0, fat: 1.1 } }
+  
+  night_stack:
+    name: "晚补 (Night Stack)"
+    aliases: ["睡前补剂", "晚上的补剂", "睡觉前的", "睡前包", "晚补", "补剂"]
+    items:
+      - { name: "钙片", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 }, micros: { calcium: 100 } }
+      - { name: "Magnesium [M] (镁 200mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Curcumin [M] (姜黄素 500mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
 
-  # ==============================
-  # 🇮🇹 意大利料理 (Italian)
-  # ==============================
-  margherita_pizza:
-    name: "Margherita Pizza (玛格丽特披萨 1/4块)"
-    calories: 320
-    macros: { carbs: 30, protein: 14, fat: 16 }
-    aliases: ["玛格丽特"]
-  carbonara_pasta:
-    name: "Traditional Carbonara (意式卡邦尼面 1份)"
-    calories: 550
-    macros: { carbs: 55, protein: 25, fat: 30 }
-    aliases: ["卡邦尼", "培根蛋面"]
+  pre_workout_stack:
+    name: "运动表现包 (Pre-workout)"
+    aliases: ["运动前喝的", "甜菜根冲剂"]
+    items:
+      - { name: "甜菜根粉", calories: 35, macros: { carbs: 8, protein: 1, fat: 0 }, micros: { sugar: 6, potassium: 250 } }
 
-  # ==============================
-  # 🇯🇵 日本料理 (Japanese)
-  # ==============================
-  salmon_sashimi:
-    name: "Salmon Sashimi (三文鱼刺身 5片/100g)"
-    calories: 200
-    macros: { carbs: 0, protein: 20, fat: 13 }
-    aliases: ["三文鱼刺身", "刺身"]
-  tonkotsu_ramen:
-    name: "Tonkotsu Ramen (豚骨拉面 1碗)"
-    calories: 750
-    macros: { carbs: 80, protein: 30, fat: 35 }
-    aliases: ["豚骨拉面", "日式拉面"]
-
-  # ==============================
-  # 🛒 山姆会员店 (Sam's Club)
-  # ==============================
-  sam_rotisserie_chicken:
-    name: "Sam's Club Rotisserie Chicken (山姆烤鸡 100g)"
-    calories: 152
-    macros: { carbs: 1, protein: 22, fat: 7 }
-    aliases: ["山姆烤鸡", "美式烤鸡"]
-  sam_swiss_roll:
-    name: "Sam's Club Swiss Roll (山姆瑞士卷 1个切片)"
-    calories: 217
-    macros: { carbs: 17, protein: 5, fat: 14 }
-    aliases: ["山姆瑞士卷", "瑞士卷"]
-  sam_beef_roll:
-    name: "Sam's Club Beef Roll (山姆牛肉卷 1个)"
-    calories: 810
-    macros: { carbs: 86, protein: 45, fat: 32 }
-    aliases: ["山姆牛肉卷", "牛肉卷"]
-  sam_beef_shank:
-    name: "Sam's Club Braised Beef Shank (山姆卤汁牛腱 100g)"
-    calories: 154
-    macros: { carbs: 1.4, protein: 29.4, fat: 3.3 }
-    aliases: ["山姆牛腱", "卤汁牛腱"]
-  sam_pork_jerky:
-    name: "Sam's Club Pork Jerky (山姆猪肉脯 100g)"
-    calories: 348
-    macros: { carbs: 33.4, protein: 34.9, fat: 8 }
-    aliases: ["山姆猪肉脯", "猪肉脯"]
-  sam_chicken_breast_parsley:
-    name: "Sam's Club Parsley Chicken Breast (欧芹低脂鸡里脊 100g)"
-    calories: 110
-    macros: { carbs: 1, protein: 23, fat: 1.5 }
-    aliases: ["欧芹鸡肉", "欧芹鸡里脊"]
-  sam_mixed_nuts:
-    name: "Sam's Club Mixed Nuts (山姆混合坚果 28g)"
-    calories: 170
-    macros: { carbs: 6, protein: 6, fat: 15 }
-    aliases: ["山姆坚果", "混合坚果"]
-
-  # ==============================
-  # 其他常驻食物
-  # ==============================
-  taiwan_lu_rou_fan:
-    name: "Taiwanese Braised Pork Rice (台湾卤肉饭)"
-    calories: 550
-    macros: { carbs: 65, protein: 18, fat: 24 }
-  beef_noodles:
-    name: "Taiwanese Beef Noodles (台湾牛肉面)"
-    calories: 650
-    macros: { carbs: 85, protein: 35, fat: 18 }
-  xiaolongbao_6pcs:
-    name: "Xiaolongbao (小笼包 6只)"
-    calories: 360
-    macros: { carbs: 42, protein: 14, fat: 18 }
+  post_workout_stack:
+    name: "肌肉恢复包 (Post-workout)"
+    aliases: ["运动后补充", "蛋白粉牛奶"]
+    items:
+      - { name: "乳清蛋白粉", calories: 120, macros: { carbs: 3, protein: 24, fat: 1.5 }, micros: { calcium: 15 } }
+      - { name: "Milk (全脂牛奶 250ml)", calories: 150, macros: { carbs: 12, protein: 8, fat: 8 }, micros: { calcium: 30, potassium: 350 } }
 
 meal_combos:
   daily_standard_breakfast:
     name: "日常标准早餐"
     aliases: ["平时吃的早餐", "老样子早餐", "标准早餐"]
     items:
-      - name: "Milk (牛奶 300ml)"
+      - name: "Milk (Full Cream, 300ml)"
         calories: 180
         macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
-      - name: "Oats (燕麦片 15g)"
-        calories: 56
-        macros: { protein: 2.0, carbs: 9.0, fat: 1.0 }
+        micros: { calcium: 30, potassium: 450, sodium: 120 }
+      - name: "Oats (燕麦片 20g)"
+        calories: 70
+        macros: { protein: 2.7, carbs: 12.0, fat: 1.3 }
+        micros: { fiber: 2.1, iron: 1.0, potassium: 85 }
       - name: "Fried Egg (煎鸡蛋 Sunny Up)"
         calories: 90
         macros: { protein: 6.3, carbs: 0.6, fat: 7.0 }
+        micros: { vitamin_a: 6, sodium: 70, calcium: 2 }
       - name: "Bread (法棍/吐司 1份)"
-        calories: 150
+        calories: 145
         macros: { protein: 4.5, carbs: 28.0, fat: 1.5 }
+        micros: { fiber: 1.5, sodium: 250 }
+
