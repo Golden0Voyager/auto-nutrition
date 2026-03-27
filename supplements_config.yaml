@@ -189,3 +189,21 @@ regional_foods:
     name: "Xiaolongbao (小笼包 6只)"
     calories: 360
     macros: { carbs: 42, protein: 14, fat: 18 }
+
+meal_combos:
+  daily_standard_breakfast:
+    name: "日常标准早餐"
+    aliases: ["平时吃的早餐", "老样子早餐", "标准早餐"]
+    items:
+      - name: "Milk (牛奶 300ml)"
+        calories: 180
+        macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
+      - name: "Oats (燕麦片 15g)"
+        calories: 56
+        macros: { protein: 2.0, carbs: 9.0, fat: 1.0 }
+      - name: "Fried Egg (煎鸡蛋 Sunny Up)"
+        calories: 90
+        macros: { protein: 6.3, carbs: 0.6, fat: 7.0 }
+      - name: "Bread (法棍/吐司 1份)"
+        calories: 150
+        macros: { protein: 4.5, carbs: 28.0, fat: 1.5 }

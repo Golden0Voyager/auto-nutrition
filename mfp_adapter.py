@@ -200,8 +200,42 @@ class MFPAdapter:
         self._ensure_token_valid()
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         meal_name = meal_map.get(meal_type.lower(), "Snacks")
-        results = []
+        
+        # --- 新增组合展开逻辑 ---
+        expanded_items = []
+        config_path = os.path.join(os.path.dirname(__file__), "supplements_config.yaml")
+        combos = {}
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    conf_data = yaml.safe_load(f)
+                    combos = conf_data.get("meal_combos", {})
+            except: pass
+
         for raw_item in items:
+            is_combo = False
+            item_name_lower = raw_item["name"].lower()
+            for combo_key, combo_conf in combos.items():
+                if combo_key.lower() in item_name_lower or any(a.lower() in item_name_lower for a in combo_conf.get("aliases", [])):
+                    # 发现匹配组合，执行展开
+                    logger.info("检测到组合匹配: {} -> 展开为 {} 项", raw_item["name"], len(combo_conf["items"]))
+                    ratio = float(raw_item.get("serving_ratio", 1.0))
+                    for c_item in combo_conf["items"]:
+                        new_item = c_item.copy()
+                        # 应用比例系数
+                        new_item["calories"] = round(new_item["calories"] * ratio, 1)
+                        if "macros" in new_item:
+                            new_item["macros"] = {k: round(v * ratio, 1) for k, v in new_item["macros"].items()}
+                        expanded_items.append(new_item)
+                    is_combo = True
+                    break
+            
+            if not is_combo:
+                expanded_items.append(raw_item)
+        # --- 展开结束 ---
+
+        results = []
+        for raw_item in expanded_items:
             item = self._apply_config_safeguard(raw_item)
             time.sleep(0.5)
             food_ref = self._create_custom_food(item)
@@ -228,6 +262,15 @@ class MFPAdapter:
         data = response.json()
         return data.get("items", [{}])[0]
 
+    def search_food_reference(self, query: str) -> str:
+        """
+        [辅助方法] 为 AI 提供联网对齐后的营养参考。
+        """
+        # 这里预留接口，未来可对接 Nutritionix 等公开 API
+        # 目前主要引导 AI 通过 Google Search 工具进行外部校验
+        logger.info("执行食物营养参考搜索: {}", query)
+        return f"请结合外部 Google Search 结果对 '{query}' 进行最终数值对齐。"
+
 mcp = FastMCP("Auto_Nutrition")
 adapter = None
 
@@ -236,7 +279,7 @@ def get_adapter():
     if adapter is None: adapter = MFPAdapter()
     return adapter
 
-@mcp.tool()
+@mcp.tool(description="按日期和餐次记录营养信息到MyFitnessPal")
 def record_nutrition(date: str, meal_type: str, items: List[FoodItemModel]) -> str:
     try:
         mfp = get_adapter()
