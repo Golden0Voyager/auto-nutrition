@@ -1,5 +1,42 @@
 # Auto_Nutrition Local Config - 补剂与常驻食物库
-# 包含丰富的中西方高频饮食、多国特色菜肴及运动补剂标准库，用于作为 LLM 识别的基准锚点（Anchor），防止幻觉。
+# 包含丰富的中西方高频饮食、多国特色菜肴及运动补剂标准库，作为 LLM 识别锚点，防止内容幻觉。
+
+metadata:
+  version: "1.1"
+  description: "与 MFP (MyFitnessPal) API 对齐的营养素单位规范"
+  unit_reference:
+    macros:
+      calories: "kcal"
+      carbs: "g"
+      protein: "g"
+      fat: "g"
+      fiber: "g"
+      sugar: "g"
+    micros_mfp:
+      sodium: "mg"
+      potassium: "mg"
+      cholesterol: "mg"
+      saturated_fat: "g"
+      polyunsaturated_fat: "g"
+      monounsaturated_fat: "g"
+      trans_fat: "g"
+      calcium: "%DV (Base: 1300mg)"
+      iron: "%DV (Base: 18mg)"
+      vitamin_a: "%DV (Base: 900mcg RAE)"
+      vitamin_c: "%DV (Base: 90mg)"
+      vitamin_d: "%DV (Base: 20mcg)"
+    micros_local: # 仅用于本地日志记录，不推送至 MFP
+      magnesium: "mg"
+      zinc: "mg"
+      caffeine: "mg"
+      epa: "mg"
+      dha: "mg"
+      curcumin: "mg"
+      glucosamine: "mg"
+      vitamin_b1: "mg"
+      vitamin_b2: "mg"
+      vitamin_b6: "mg"
+      vitamin_b12: "mcg"
 
 supplements:
   # --- 基础与恢复补剂 ---
@@ -7,126 +44,216 @@ supplements:
     name: "Maurten Gel 100 (Energy Gel)"
     calories: 100
     macros: { carbs: 25, protein: 0, fat: 0 }
-    aliases: ["能量胶", "补给胶", "马丁胶"]
+    micros: { sugar: 12.5, sodium: 28, caffeine: 0 } # 100 版不含咖啡因，100 CAF 为 100mg
+    aliases: ["能量胶", "补给胶", "马丁胶", "马丁", "Gel", "Maurten", "100胶"]
   electrolytes_tablet:
-    name: "Electrolyte Tab / Salt Pill (盐丸/无糖泡腾片)"
+    name: "Electrolyte Tab / Salt Pill (电解质盐丸/无糖泡腾片)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
     micros: { sodium: 300, potassium: 150 }
-    aliases: ["盐丸", "电解质片", "电解质冲剂"]
+    aliases: ["盐丸", "电解质片", "电解质冲剂", "补盐", "吃颗盐", "Salt Pill", "泡腾片", "S-Caps"]
+
   # --- 精准运动功能饮料与补剂 ---
   gatorade_600ml:
     name: "Gatorade (佳得乐运动饮料 600ml)"
     calories: 156
     macros: { carbs: 39, protein: 0, fat: 0 }
-    micros: { sodium: 270, potassium: 75 }
-    aliases: ["佳得乐", "gatorade"]
+    micros: { sodium: 270, potassium: 75, sugar: 36 }
+    aliases: ["佳得乐", "gatorade", "运动饮料", "解渴水", "蓝水", "橙水"]
   pocari_sweat_500ml:
     name: "Pocari Sweat (宝矿力水特 500ml)"
     calories: 135
     macros: { carbs: 33, protein: 0, fat: 0 }
-    micros: { sodium: 245, potassium: 100 }
-    aliases: ["宝矿力", "宝矿力水特", "pocari"]
-  # --- 专业补剂 ---
+    micros: { sodium: 245, potassium: 100, sugar: 31 }
+    aliases: ["宝矿力", "宝矿力水特", "pocari", "水特", "白水", "Pocari Sweat"]
+
+  # --- 专业功能补剂 ---
   whey_protein_1scoop:
     name: "Whey Protein Concentrate (乳清蛋白粉 1 Scoop)"
     calories: 120
     macros: { carbs: 3, protein: 24, fat: 1.5 }
-    micros: { calcium: 2 }
+    micros: 
+      calcium: 10.8 # 140mg / 1300mg
+      sodium: 46.8
+      cholesterol: 4.8
+      iron: 1.9
+      potassium: 150
     aliases: ["蛋白粉", "乳清蛋白"]
   fish_oil_1cap:
     name: "Fish Oil (鱼油 1 Capsule)"
     calories: 10
     macros: { carbs: 0, protein: 0, fat: 1.1 }
+    micros: 
+      epa: 180
+      dha: 120
+      saturated_fat: 0.3
+      polyunsaturated_fat: 0.6
+      monounsaturated_fat: 0.2
+      cholesterol: 5.7
+      vitamin_a: 33.3 # 300mcg / 900mcg
+      vitamin_d: 12.5 # 2.5mcg / 20mcg
     aliases: ["鱼油"]
   beetroot_powder:
     name: "Beetroot Powder (甜菜根粉 1份)"
     calories: 35
     macros: { carbs: 8, protein: 1, fat: 0 }
-    micros: { sugar: 6, potassium: 250 }
+    micros: { sugar: 6, potassium: 250, fiber: 1.5, iron: 3 }
     aliases: ["甜菜根粉", "甜菜根"]
   calcium_pill:
-    name: "Calcium Supplement (钙片 1片)"
+    name: "Calcium Supplement (钙片 1片 - 600mg)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    micros: { calcium: 100 }
+    micros: { calcium: 46.1, vitamin_d: 10 } # 600mg / 1300mg
     aliases: ["钙片"]
   magnesium_pill:
-    name: "Magnesium [M] (镁 200mg)"
+    name: "Magnesium [M] (镁 200mg - 高吸收甘氨酸镁)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["镁片"]
+    micros: { magnesium: 200 }
+    aliases: ["镁片", "补镁"]
   curcumin_pill:
-    name: "Curcumin [M] (姜黄素 500mg)"
+    name: "Curcumin [M] (姜黄素 500mg - 强效抗炎/恢复)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["姜黄素"]
+    micros: { curcumin: 500 }
+    aliases: ["姜黄素", "姜黄"]
   glucosamine_pill:
-    name: "Glucosamine [M] (氨糖 1500mg)"
+    name: "Glucosamine [M] (氨糖软骨素 1500mg - 关节养护)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["氨糖", "氨糖软骨素"]
+    micros: { glucosamine: 1500 }
+    aliases: ["氨糖", "氨糖软骨素", "关节片"]
   vitamin_b_complex:
-    name: "Vitamin B Complex (高剂量 B族)"
+    name: "Vitamin B Complex (高剂量 B族活力包)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["维生素B", "VB"]
+    micros: 
+      vitamin_b1: 100
+      vitamin_b2: 100
+      vitamin_b6: 100
+      vitamin_b12: 500
+    aliases: ["维生素B", "VB", "B族"]
 
 regional_foods:
   bayu_dumplings:
     name: "Mackerel Dumplings (胶东鲅鱼水饺 10只)"
     calories: 550
     macros: { carbs: 55, protein: 35, fat: 22 }
-    micros: { sodium: 850 }
+    micros: 
+      sodium: 850
+      potassium: 380
+      iron: 12
+      calcium: 4
+      cholesterol: 75
+      fiber: 1.5
   shanghai_hong_shao_rou:
     name: "Shanghai Red Braised Pork (本帮红烧肉 150g)"
     calories: 580
     macros: { carbs: 25, protein: 15, fat: 45 }
-    micros: { sugar: 15, sodium: 600 }
-  
+    micros: 
+      sugar: 15
+      sodium: 600
+      cholesterol: 110
+      saturated_fat: 18
+      iron: 7
+      potassium: 260
+
+  braised_beef_100g:
+    name: "Braised Beef (传统酱牛肉 100g)"
+    calories: 246
+    macros: { protein: 31.4, carbs: 3.2, fat: 11.0 }
+    micros:
+      sodium: 700
+      cholesterol: 92
+      potassium: 350
+    aliases: ["酱牛肉", "卤牛肉"]
+
 common_foods:
   milk_full_cream_300ml:
-    name: "Milk (Full Cream, 300ml - 一份)"
+    name: "Milk (Full Cream, 300ml)"
     calories: 180
-    macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
-    micros: { calcium: 30, potassium: 450, sodium: 120, cholesterol: 30 }
+    macros: { protein: 9.8, carbs: 13.9, fat: 9.6 }
+    micros: 
+      calcium: 28.5
+      potassium: 450
+      sodium: 114
+      cholesterol: 36
+      vitamin_a: 10.8
+      vitamin_d: 14.4
+      saturated_fat: 5.6
+      sugar: 13.9
     aliases: ["牛奶", "全脂牛奶", "Milk", "Full Cream Milk", "一份牛奶"]
   apple_medium:
     name: "Apple (Red/Green, Medium)"
     calories: 95
     macros: { protein: 0.5, carbs: 25, fat: 0.3 }
-    micros: { fiber: 4.5, vitamin_c: 14, potassium: 195 }
+    micros: 
+      fiber: 4.5
+      vitamin_c: 14
+      potassium: 195
+      sugar: 19
+      vitamin_a: 1
+      calcium: 1.0
+      iron: 0.2
     aliases: ["苹果", "Apple", "中等苹果"]
+
+  fried_egg:
+    name: "Fried Egg (煎鸡蛋 Sunny Up)"
+    calories: 90
+    macros: { protein: 6.3, carbs: 0.6, fat: 7.0 }
+    micros: 
+      vitamin_a: 8.9
+      sodium: 71
+      calcium: 2.1
+      cholesterol: 186
+      vitamin_d: 5.0
+      saturated_fat: 1.6
+      iron: 4.8
+    aliases: ["煎鸡蛋", "煎蛋", "荷包蛋", "单面煎蛋", "双面煎蛋"]
+
+  sam_club_mochi:
+    name: "Sam's Club Mochi (山姆麻薯面包 1个约25g)"
+    calories: 85
+    macros: { protein: 1.0, carbs: 14.0, fat: 2.5 }
+    micros: { sugar: 3.5, sodium: 60 }
+    aliases: ["山姆麻薯", "麻薯", "麻薯面包"]
+
+  ejiao_cake:
+    name: "Ejiao Cake (阿胶糕 1片约3g)"
+    calories: 12
+    macros: { protein: 0.3, carbs: 1.8, fat: 0.5 }
+    micros: { sugar: 1.2, iron: 0.5 }
+    aliases: ["阿胶糕", "阿胶"]
 
 routines:
   morning_stack:
     name: "晨补 (Morning Stack)"
     aliases: ["晨间补剂", "晨间活力包", "早上的补剂", "早起补剂", "晨补", "补剂"]
     items:
-      - { name: "Vitamin B Complex (高剂量 B族)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
-      - { name: "Glucosamine [M] (氨糖 1500mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
-      - { name: "鱼油", calories: 10, macros: { carbs: 0, protein: 0, fat: 1.1 } }
-  
+      - { name: "Vitamin B Complex", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Glucosamine [M]", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Fish Oil", calories: 10, macros: { carbs: 0, protein: 0, fat: 1.1 }, micros: { polyunsaturated_fat: 0.6, cholesterol: 10 } }
+
   night_stack:
     name: "晚补 (Night Stack)"
     aliases: ["睡前补剂", "晚上的补剂", "睡觉前的", "睡前包", "晚补", "补剂"]
     items:
-      - { name: "钙片", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 }, micros: { calcium: 100 } }
-      - { name: "Magnesium [M] (镁 200mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
-      - { name: "Curcumin [M] (姜黄素 500mg)", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Calcium", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 }, micros: { calcium: 46, vitamin_d: 10 } }
+      - { name: "Magnesium [M]", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "Curcumin [M]", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
 
   pre_workout_stack:
     name: "运动表现包 (Pre-workout)"
     aliases: ["运动前喝的", "甜菜根冲剂"]
     items:
-      - { name: "甜菜根粉", calories: 35, macros: { carbs: 8, protein: 1, fat: 0 }, micros: { sugar: 6, potassium: 250 } }
+      - { name: "甜菜根粉", calories: 35, macros: { carbs: 8, protein: 1, fat: 0 }, micros: { sugar: 6, potassium: 250, fiber: 1.5, iron: 3 } }
 
   post_workout_stack:
     name: "肌肉恢复包 (Post-workout)"
     aliases: ["运动后补充", "蛋白粉牛奶"]
     items:
-      - { name: "乳清蛋白粉", calories: 120, macros: { carbs: 3, protein: 24, fat: 1.5 }, micros: { calcium: 15 } }
-      - { name: "Milk (全脂牛奶 250ml)", calories: 150, macros: { carbs: 12, protein: 8, fat: 8 }, micros: { calcium: 30, potassium: 350 } }
+      - { name: "Whey Protein", calories: 120, macros: { carbs: 3, protein: 24, fat: 1.5 }, micros: { calcium: 10, sodium: 100, cholesterol: 55 } }
+      - { name: "Milk (Full Cream, 250ml)", calories: 150, macros: { carbs: 12, protein: 8, fat: 8 }, micros: { calcium: 25, potassium: 350, sodium: 100, vitamin_d: 12 } }
 
 meal_combos:
   daily_standard_breakfast:
@@ -136,17 +263,17 @@ meal_combos:
       - name: "Milk (Full Cream, 300ml)"
         calories: 180
         macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
-        micros: { calcium: 30, potassium: 450, sodium: 120 }
-      - name: "Oats (燕麦片 20g)"
-        calories: 70
-        macros: { protein: 2.7, carbs: 12.0, fat: 1.3 }
-        micros: { fiber: 2.1, iron: 1.0, potassium: 85 }
+        micros: { calcium: 30, potassium: 450, sodium: 120, vitamin_d: 15, sugar: 15.0 }
+      - name: "Oats (燕麦片 15g)"
+        calories: 37
+        macros: { protein: 2.6, carbs: 9.9, fat: 1.1 }
+        micros: { fiber: 2.3, iron: 4.5, potassium: 85, sodium: 0.6, calcium: 0.7 }
       - name: "Fried Egg (煎鸡蛋 Sunny Up)"
         calories: 90
         macros: { protein: 6.3, carbs: 0.6, fat: 7.0 }
-        micros: { vitamin_a: 6, sodium: 70, calcium: 2 }
-      - name: "Bread (法棍/吐司 1份)"
+        micros: { vitamin_a: 8.9, sodium: 71, calcium: 2.1, cholesterol: 186, vitamin_d: 5.0, saturated_fat: 1.6, iron: 4.8 }
+      - name: "Bread (法棍/吐司 50g/约2片)"
         calories: 145
         macros: { protein: 4.5, carbs: 28.0, fat: 1.5 }
-        micros: { fiber: 1.5, sodium: 250 }
+        micros: { fiber: 1.5, sodium: 250, iron: 5 }
 

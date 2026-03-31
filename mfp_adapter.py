@@ -1,10 +1,17 @@
 import os
+import sys
 import json
 import time
 import requests
 import yaml
+import re
+import tempfile
+import asyncio
+import random
+import sqlite3
 from datetime import datetime
 from typing import List, Dict, Optional, Any
+from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
@@ -61,7 +68,7 @@ load_dotenv()
 # 配置 loguru
 logger.remove()
 logger.add(
-    lambda msg: print(msg, end=""),
+    sys.stderr,
     format="<green>{time:HH:mm:ss}</green> | <level>{level:<7}</level> | {message}",
     level="DEBUG",
 )
@@ -69,6 +76,122 @@ logger.add(
 class SessionExpiredError(Exception):
     """当 MyFitnessPal 会话过期或无效时抛出"""
     pass
+
+class USDALocalResolver:
+    """
+    本地 USDA 数据库查询引擎，使用 SQLite FTS5 全文索引实现。
+    """
+    DB_PATH = Path("usda_core.db")
+
+    def __init__(self):
+        # 预加载字段映射，保持逻辑与原 USDAClient 一致
+        self.fields = ["energy", "protein", "carbs", "fat", "sodium", "potassium", "fiber", "sugar"]
+
+    # 常用多语言食材英文映射表（用于检测到非英文输入时给出诊断提示）
+    LANG_GUARD_HINTS = {
+        "苹果": "Apple", "鸡蛋": "Egg", "牛肉": "Beef", "鸡胸肉": "Chicken Breast",
+        "三文鱼": "Salmon", "糙米": "Brown Rice", "菠菜": "Spinach", "牛油果": "Avocado",
+        "花椰菜": "Broccoli", "全麦面包": "Whole Wheat Bread", "猪肉": "Pork",
+        "燕麦": "Oats", "香蕉": "Banana", "西红柿": "Tomato",
+    }
+
+    def search(self, query: str, page_size: int = 3) -> List[Dict[str, Any]]:
+        """在本地 FTS5 虚拟表中进行极速全文搜索。
+
+        IMPORTANT: query MUST be in English for the FTS5 index to work correctly.
+        Non-English input will yield 0 results. The caller (LLM) is responsible
+        for translating all food names to English before invoking this method.
+        """
+        # 语言守卫：检测非 ASCII 输入（中文、日文等），发出强警告
+        has_non_ascii = any(ord(c) > 127 for c in query)
+        if has_non_ascii:
+            hint = next(
+                (eng for cn, eng in self.LANG_GUARD_HINTS.items() if cn in query),
+                None,
+            )
+            hint_msg = f" 建议英文词: '{hint}'" if hint else " 请将食物名翻译为英文后重试。"
+            logger.warning(
+                "[USDA语言守卫] 检测到非英文查询词: '{}' — USDA FTS5 仅支持英文，命中率将为 0！{}",
+                query,
+                hint_msg,
+            )
+
+        if not self.DB_PATH.exists():
+            logger.warning("本地 USDA 数据库不存在，将跳过 Level 2 检索。")
+            return []
+
+        try:
+            conn = sqlite3.connect(self.DB_PATH)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # 使用 SQLite FTS5 进行 BM25 相关性排序搜索
+            # 处理 query 增加通配符
+            processed_query = ' '.join([f"{word}*" for word in re.findall(r'\w+', query)])
+            
+            sql = f"""
+                SELECT f.*, rank
+                FROM foods f
+                JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
+                WHERE foods_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """
+            cursor.execute(sql, (processed_query, page_size))
+            rows = cursor.fetchall()
+            conn.close()
+
+            results = []
+            for row in rows:
+                # 转换为 MFP 适配器需要的格式
+                results.append({
+                    "name": row["description"],
+                    "calories_per_100g": row["energy"],
+                    "macros_per_100g": {
+                        "protein": row["protein"],
+                        "carbs": row["carbs"],
+                        "fat": row["fat"],
+                        "sodium": row["sodium"],
+                        "potassium": row["potassium"],
+                        "fiber": row["fiber"],
+                        "sugar": row["sugar"]
+                    }
+                })
+            return results
+        except Exception as e:
+            logger.error("本地 USDA 检索失败: {}", e)
+            return []
+        nutrients_raw = {}
+        for fn in food.get("foodNutrients", []):
+            nid = fn.get("nutrientId")
+            val = fn.get("value")
+            if nid and val is not None:
+                nutrients_raw[nid] = val
+
+        calories = nutrients_raw.get(1008, 0)
+        macros = {}
+
+        for nid, (field_name, unit) in self.NUTRIENT_MAP.items():
+            if nid == 1008:
+                continue
+            val = nutrients_raw.get(nid)
+            if val is None:
+                continue
+            # %DV 字段需要单位转换
+            if unit == "%DV" and field_name in self.DV_BASES:
+                val = round(val / self.DV_BASES[field_name] * 100, 1)
+            else:
+                val = round(val, 2)
+            macros[field_name] = val
+
+        return {
+            "name": food.get("description", "Unknown"),
+            "fdcId": food.get("fdcId"),
+            "dataType": food.get("dataType"),
+            "calories_per_100g": round(calories, 1),
+            "macros_per_100g": macros,
+        }
+
 
 class MFPAdapter:
     """
@@ -78,16 +201,15 @@ class MFPAdapter:
     BASE_URL = "https://api.myfitnesspal.com/v2"
     TOKEN_URL = "https://www.myfitnesspal.com/user/auth_token?refresh=true"
     COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
+    JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutrition_journal.json")
 
     def __init__(self, username: Optional[str] = None):
-        self.username = username or os.getenv("MFP_USERNAME")
+        self.BASE_URL = "https://api.myfitnesspal.com/v2"
+        self.JOURNAL_FILE = "nutrition_journal.json"
+        self.usda = USDALocalResolver()
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/122.0.0.0 Safari/537.36"
-            ),
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0",
             "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         })
 
@@ -120,7 +242,8 @@ class MFPAdapter:
 
     def _load_cookies(self) -> None:
         if not os.path.exists(self.COOKIES_FILE):
-            raise SessionExpiredError(f"未找到 {self.COOKIES_FILE}")
+            logger.warning(f"未找到 {self.COOKIES_FILE}，请先执行 `refresh_login` 工具重置登录凭据。")
+            return
         try:
             with open(self.COOKIES_FILE, "r") as f:
                 cookie_data = json.load(f)
@@ -130,9 +253,12 @@ class MFPAdapter:
             self.session.cookies.update(jar)
             logger.info("从 {} 加载了 {} 条 Cookie", self.COOKIES_FILE, len(cookie_data))
         except Exception as exc:
-            raise SessionExpiredError(f"加载 Cookie 文件失败: {exc}")
+            logger.warning(f"加载 Cookie 文件失败，请重新登录: {exc}")
 
     def _fetch_access_token(self) -> None:
+        if not self.session.cookies:
+            logger.warning("未找到有效 Cookie，跳过 Token 获取。")
+            return
         try:
             resp = self.session.get(self.TOKEN_URL)
             resp.raise_for_status()
@@ -150,27 +276,34 @@ class MFPAdapter:
             })
             logger.info("Bearer Token 刷新成功 | User ID: {} | 有效期: {}s", self.user_id, expires_in)
         except Exception as exc:
-            logger.error("获取 Token 失败，可能是 Cookie 已失效: {}", exc)
-            raise SessionExpiredError(f"获取 Token 失败 (请检查 cookies.json): {exc}")
+            # 如果请求返回 401 且 Cookie 确实失效，主动清理
+            if isinstance(exc, requests.exceptions.HTTPError) and exc.response.status_code == 401:
+                logger.warning("检测到会话已彻底失效 (401)，正在置空 Token...")
+                self.access_token = None
+            else:
+                logger.warning("获取 Token 失败，可能是网络波动或 Cookie 已失效: {}", exc)
+                self.access_token = None
 
     def _ensure_token_valid(self) -> None:
         if time.time() > (self.token_expires_at - 3600):
             self._fetch_access_token()
+        if not self.access_token:
+            raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `refresh_login` 工具重置登录凭据。")
 
     def _create_custom_food(self, item: Dict[str, Any]) -> Dict[str, str]:
         nutritional_contents = {
-            "energy": {"unit": "calories", "value": item["calories"]},
-            "protein": item["macros"].get("protein", 0),
-            "carbohydrates": item["macros"].get("carbs", 0),
-            "fat": item["macros"].get("fat", 0),
+            "energy": {"unit": "calories", "value": item.get("calories", 0)},
         }
         
-        # 映射微量营养素 (MyFitnessPal API 字段映射)
+        # 内部映射，将模型字段还原为 MFP 字段
         field_map = {
+            "protein": "protein",
+            "carbs": "carbohydrates",
+            "fat": "fat",
             "sodium": "sodium",
             "potassium": "potassium",
-            "calcium": "calcium",
             "iron": "iron",
+            "calcium": "calcium",
             "vitamin_a": "vitamin_a",
             "vitamin_c": "vitamin_c",
             "vitamin_d": "vitamin_d",
@@ -183,9 +316,10 @@ class MFPAdapter:
             "trans_fat": "trans_fat"
         }
         
+        macros_data = item.get("macros", {})
         for model_field, mfp_field in field_map.items():
-            if model_field in item["macros"] and item["macros"][model_field] is not None:
-                nutritional_contents[mfp_field] = item["macros"][model_field]
+            if model_field in macros_data and macros_data[model_field] is not None:
+                nutritional_contents[mfp_field] = macros_data[model_field]
 
         food_payload = {
             "item": {
@@ -255,9 +389,18 @@ class MFPAdapter:
                 aliases = {key.lower(), conf.get("name", "").lower()} | {a.lower() for a in conf.get("aliases", [])}
                 aliases.discard("") # 移除空字符串
                 
-                if any(alias in name_lower for alias in aliases):
-                    matched_conf = conf
-                    matched_key = key
+                for alias in aliases:
+                    if all(ord(c) < 128 for c in alias):
+                        # 纯英文使用单词边界正则匹配，防止 "Gel" 匹配 "Gelatin"
+                        if re.search(r'\b' + re.escape(alias) + r'\b', name_lower):
+                            matched_conf = conf
+                            break
+                    else:
+                        # 包含中文则使用子字符串匹配
+                        if alias in name_lower:
+                            matched_conf = conf
+                            break
+                if matched_conf:
                     break
             if matched_conf:
                 break
@@ -285,20 +428,41 @@ class MFPAdapter:
             
         return item
 
+    def _parse_quantity(self, text: str) -> tuple[float, str, str]:
+        """从字符串中解析份量、单位和食物名称。例如 '100g 酱牛肉' -> (1.0, '100g', '酱牛肉')"""
+        # 匹配数字+单位（如 100g, 3片, 2个, 1.5勺）
+        match = re.match(r'^([\d\.]+)\s*([a-zA-Z\u4e00-\u9fa5]+)\s*(.*)$', text.strip())
+        if match:
+            qty, unit, name = match.groups()
+            # 如果单位是 g，则按 /100 进行 ratio 计算
+            ratio = float(qty) / 100.0 if unit.lower() == 'g' else float(qty)
+            return ratio, f"{qty}{unit}", name
+        return 1.0, "1 serving", text
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def record_nutrition(self, date_str: str, meal_type: str, items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def record_nutrition(self, date_str: str, meal_type: str, items: List[Any]) -> Dict[str, Any]:
         self._ensure_token_valid()
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         meal_name = meal_map.get(meal_type.lower(), "Snacks")
         
+        # 预处理：将所有输入转为 Dict，并提取份量
+        processed_items = []
+        for raw in items:
+            if isinstance(raw, str):
+                ratio, display_qty, name = self._parse_quantity(raw)
+                processed_items.append({"name": name, "serving_ratio": ratio, "display_qty": display_qty})
+            elif isinstance(raw, dict):
+                processed_items.append(raw)
+            else: # Pydantic Model
+                processed_items.append(raw.model_dump() if hasattr(raw, 'model_dump') else raw)
+
         # --- 组合/包展开逻辑 ---
         expanded_items = []
         conf_data = self._load_config()
-        # 统一处理 meal_combos 和 routines
         combos = conf_data.get("meal_combos", {}).copy()
         combos.update(conf_data.get("routines", {}))
 
-        for raw_item in items:
+        for raw_item in processed_items:
             is_combo = False
             item_name_lower = raw_item["name"].lower()
             for combo_key, combo_conf in combos.items():
@@ -311,7 +475,6 @@ class MFPAdapter:
                         new_item["calories"] = round(new_item.get("calories", 0) * ratio, 1)
                         if "macros" in new_item:
                             new_item["macros"] = {k: round(v * ratio, 1) for k, v in new_item["macros"].items()}
-                        # 同时支持组合内的 micros 字段映射到 macros
                         if "micros" in new_item:
                             new_item.setdefault("macros", {})
                             for mk, mv in new_item["micros"].items():
@@ -324,23 +487,89 @@ class MFPAdapter:
 
         results = []
         for raw_item in expanded_items:
+            # Level 1: 本地配置匹配 (supplements_config.yaml)
             item = self._apply_config_safeguard(raw_item)
-            time.sleep(0.5)
-            food_ref = self._create_custom_food(item)
-            diary_entry = {
-                "type": "food_entry",
+            
+            # Level 2: USDA 外部数据库搜索 (如果本地查找后仍无数据)
+            if item.get("calories") is None or item["calories"] == 0:
+                name_for_search = item["name"]
+                logger.info("本地未匹配，尝试 USDA 搜索: {}", name_for_search)
+                try:
+                    usda_results = self.usda.search(name_for_search, page_size=1)
+                    if usda_results:
+                        top = usda_results[0]
+                        ratio = float(item.get("serving_ratio", 1.0))
+                        item["calories"] = round(top["calories_per_100g"] * ratio, 1)
+                        item["macros"] = {k: round(v * ratio, 1) for k, v in top["macros_per_100g"].items()}
+                        logger.info("USDA 匹配成功: {} ({} kcal)", top["name"], item["calories"])
+                except Exception as e:
+                    logger.warning("USDA 搜索异常: {}", e)
+
+            # Level 3: 最终兜底 (确保字段存在，防止下一步报错)
+            if item.get("calories") is None: 
+                item["calories"] = 0
+            if "macros" not in item:
+                item["macros"] = {}
+
+            try:
+                time.sleep(0.5)
+                food_ref = self._create_custom_food(item)
+                diary_entry = {
+                    "type": "food_entry",
+                    "date": date_str,
+                    "meal_name": meal_name,
+                    "food": {"id": food_ref["id"], "version": food_ref["version"]},
+                    "servings": 1.0,
+                    "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
+                    "client_id": "mfp-main-js"
+                }
+                response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
+                response.raise_for_status()
+                results.append({"name": item["name"], "calories": item["calories"]})
+                logger.info('成功录入: "{name}" ({cal} kcal)', name=item["name"], cal=item["calories"])
+            except requests.exceptions.HTTPError as he:
+                logger.error('API 拒绝了 "{name}" 的请求: {error}', name=item["name"], error=he.response.text if hasattr(he, 'response') else he)
+            except Exception as e:
+                logger.error('录入 "{name}" 失败: {error}', name=item["name"], error=e)
+        
+        # --- 本地高保真日志记录 ---
+        self._log_to_local_journal(date_str, meal_name, expanded_items)
+        
+        return {"status": "ok", "count": len(results)}
+
+    def _log_to_local_journal(self, date_str: str, meal_name: str, items: List[Dict[str, Any]]) -> None:
+        """
+        在本地保存完整的营养数据副本，包括 MFP 不支持的微量元素。
+        采用原子写入（tempfile + os.replace）机制防崩溃。
+        """
+        try:
+            journal = []
+            if os.path.exists(self.JOURNAL_FILE):
+                with open(self.JOURNAL_FILE, "r", encoding="utf-8") as f:
+                    journal = json.load(f)
+            
+            # 日志条目结构
+            entry = {
+                "timestamp": datetime.now().isoformat(),
                 "date": date_str,
                 "meal_name": meal_name,
-                "food": {"id": food_ref["id"], "version": food_ref["version"]},
-                "servings": 1.0,
-                "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
-                "client_id": "mfp-main-js"
+                "items": items
             }
-            response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
-            response.raise_for_status()
-            results.append(response.json())
-            logger.info('录入 "{name}" ({cal} kcal) -> {date} / {meal}', name=item["name"], cal=item["calories"], date=date_str, meal=meal_name)
-        return {"status": "ok", "count": len(results)}
+            journal.append(entry)
+            
+            # 保持近期日志 (可选：保留最近 1000 条)
+            if len(journal) > 1000: journal = journal[-1000:]
+            
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
+                json.dump(journal, tf, indent=2, ensure_ascii=False)
+                temp_name = tf.name
+                
+            os.replace(temp_name, self.JOURNAL_FILE)
+            logger.info("本地高保真日志已原子录入 ({})", len(items))
+        except Exception as e:
+            logger.error("本地日志原子录入失败: {}", e)
+            if 'temp_name' in locals() and os.path.exists(temp_name):
+                os.remove(temp_name)
 
     def delete_diary_entry(self, entry_id: str) -> bool:
         """
@@ -376,20 +605,69 @@ def get_adapter():
     return adapter
 
 @mcp.tool()
-def record_nutrition(date: str, meal_type: str, items: List[FoodItemModel]) -> str:
+def record_nutrition(date: str, meal_type: str, items: List[Any]) -> str:
     """
     Record food, nutrients, or supplements to MyFitnessPal.
     记录食物、营养素或补剂到 MyFitnessPal。
-    
+
+    ## 🌍 CRITICAL — Multilingual Input Rules (MUST follow before every call)
+
+    ### Rule A · Basic Ingredients → ENGLISH ONLY for USDA lookup
+    The local usda_core.db FTS5 engine ONLY understands English. Non-English
+    queries will yield ZERO results. ALWAYS translate before calling.
+
+    Translation table (memorize these patterns):
+      苹果 / Manzana / りんご / Pomme       → "Apple"
+      鸡蛋 / Ei / Huevo / Œuf              → "Egg"
+      牛肉 / Rindfleisch / Carne de res    → "Beef"
+      鸡胸肉 / Pechuga / Poitrine poulet   → "Chicken Breast"
+      三文鱼 / Salmón / サーモン            → "Salmon"
+      糙米 / Arroz integral / Riz brun     → "Brown Rice"
+      全麦面包 / Pain complet / Vollkorn   → "Whole Wheat Bread"
+      牛油果 / Aguacate / Avocat           → "Avocado"
+      菠菜 / Espinaca / Épinard           → "Spinach"
+
+    ### Rule B · Regional / Complex Dishes → AI estimation Dict (NOT a string)
+    For culture-specific dishes (宫保鸡丁, Paella, Rendang, Biryani, Pad Krapao
+    etc.) that are unlikely to be in USDA, SKIP the lookup and pass a full Dict:
+      {"name": "宫保鸡丁 (200g, AI估算)", "calories": 360,
+       "macros": {"protein": 28, "carbs": 18, "fat": 16, "sodium": 650}}
+    NEVER pass only the dish name as a string — it will log as 0 kcal.
+
+    ### Rule C · Unit Normalization (flatten before calling)
+    Convert all non-metric units to grams first, then compute serving_ratio:
+      1 oz  → 28.35 g    |  1 cup liquid → 240 g   |  1 cup flour → 125 g
+      1 tbsp → 15 g      |  1 tsp → 5 g             |  1 lb → 453.6 g
+    serving_ratio = actual_grams / 100
+
+    ### Rule D · Self-healing for unknown languages
+    If user input language is unrecognized, make your best semantic translation,
+    mark the name with "(AI估算，请确认)", pass as Dict, then ask the user
+    to confirm.
+
+    ## Quick Decision Tree
+      Input → In supplements_config? → YES: use config values directly
+                                     → NO: Simple ingredient?
+                                            YES → translate to EN → lookup_food_nutrition
+                                                  → USDA hit? YES → scale by grams
+                                                              NO  → AI estimate Dict
+                                            NO → Regional dish?
+                                                  YES → AI estimate Dict (skip USDA)
+                                                  NO  → self-healing bridge → Dict + confirm
+
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         meal_type (str): breakfast, lunch, dinner, or snack. | 餐次类型。
-        items (List[FoodItemModel]): List of food items to record. | 待记录的食物列表。
+        items (List[Union[str, Dict]]): 
+            1. 简单食材：传字符串 (e.g. '100g Chicken Breast', '200g Brown Rice')，
+               系统自动走 本地库 → USDA 检索流水线。
+               ⚠️ 字符串中的食物名必须已经翻译为英文！
+            2. 地域菜肴/复合食品：传完整数值 Dict，包含 name/calories/macros，
+               名称中注明 AI估算，防止 0 kcal 幻觉录入。
     """
     try:
         mfp = get_adapter()
-        validated_items = [i.model_dump() for i in items]
-        result = mfp.record_nutrition(date, meal_type, validated_items)
+        result = mfp.record_nutrition(date, meal_type, items)
         return f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
     except Exception as exc: return f"错误: {exc}"
 
@@ -489,64 +767,73 @@ def get_user_metadata() -> str:
         return f"获取用户信息失败: {exc}"
 
 @mcp.tool()
-def refresh_login(username: Optional[str] = None, password: Optional[str] = None) -> str:
+async def refresh_login(username: Optional[str] = None, password: Optional[str] = None) -> str:
     """
-    Refresh MyFitnessPal login cookies using a browser (Playwright). 
-    If credentials are provided, it will attempt auto-fill.
-    使用浏览器（Playwright）刷新 MyFitnessPal 登录状态。
+    [DEPRECATED] Automated login is blocked by Cloudflare. This tool now returns the manual cookie import guide.
+    由于 Cloudflare 的拦截，自动登录流程已废弃。此工具现直接返回手动导入 Cookie 的详细指南，引导大家使用手动方式绕过。
+    """
+    logger.warning("自动登录流程已被禁用（Cloudflare拦截）。直接向调用者返回手动导入 Cookie 的指南。")
+    return get_cookie_guide()
+
+@mcp.tool()
+def get_cookie_guide() -> str:
+    """
+    Get the manual cookie export guide for bypass Cloudflare/CAPTCHA issues.
+    获取手动导出 Cookie 并修复 MFP 认证的详细教程（用于绕过防火墙或验证码）。
+    """
+    guide = (
+        "### 🛡️ 手动认证恢复指南 (Manual Auth Bypass)\n\n"
+        "由于 MyFitnessPal 启用了 Cloudflare 真人验证，自动登录有时会被拦截。您可以按照以下步骤 1 分钟内手动恢复服务：\n\n"
+        "1. **安装插件**：在 Chrome 或 Edge 浏览器安装 `Cookie-Editor` (推荐) 或 `EditThisCookie` 扩展。\n"
+        "2. **正常登录**：在浏览器中打开并登录 [MyFitnessPal.com](https://www.myfitnesspal.com/account/login)。\n"
+        "3. **导出数据**：\n"
+        "   - 点击浏览器右上角的插件图标。\n"
+        "   - 点击 **Export** (导出)，选择 **JSON** 格式。\n"
+        "4. **粘贴导入**：复制剪贴板中的内容，然后调用当前助手的 `import_cookies(json_data='...')` 工具，将内容直接贴入参数中。\n\n"
+        "一旦完成，服务将立即满血恢复。您的 Cookie 将保留在本地，不会流向云端。"
+    )
+    return guide
+
+@mcp.tool()
+def import_cookies(json_data: str) -> str:
+    """
+    Manually import MyFitnessPal cookies from a JSON string (exported from browser extensions).
+    手动导入浏览器导出的 MFP Cookie JSON 字符串，以绕过登录阻断。
     
     Args:
-        username (str, optional): MFP Username/Email for auto-fill. | MFP 用户名或邮箱。
-        password (str, optional): MFP Password for auto-fill. | MFP 密码。
+        json_data (str): The exported JSON cookies string. | 浏览器插件导出的 JSON 字符串。
     """
     try:
-        from playwright.sync_api import sync_playwright
-        import time
+        data = json.loads(json_data.strip())
+        if not isinstance(data, list):
+            return "格式错误：请确保您粘贴的是从 Cookie-Editor 导出的 JSON 数组格式内容。"
         
-        with sync_playwright() as p:
-            # 使用有头模式 (headless=False) 以便用户在必要时处理验证码
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            page = context.new_page()
+        # 验证核心令牌是否存在
+        has_token = any(c.get('name') in ['__Secure-next-auth.session-token', 'mfp-session'] for c in data)
+        if not has_token:
+            logger.warning("录入的 Cookie 可能缺少核心 Session 令牌，建议重新登录后导出。")
             
-            logger.info("正在打开 MyFitnessPal 登录页面...")
-            page.goto("https://www.myfitnesspal.com/account/login", timeout=60000)
+        cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
+        with open(cookies_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
             
-            if username and password:
-                # 尝试自动填充
-                try:
-                    page.fill('input[name="username"]', username)
-                    page.fill('input[name="password"]', password)
-                    page.click('button[type="submit"]')
-                except Exception as e:
-                    logger.warning("自动填充失败，请手动输入: {}", e)
-            
-            logger.info("等待登录完成 (请在地浏览器中操作，完成后将自动跳转)...")
-            # 等待跳转到日记或主页
-            try:
-                page.wait_for_url("**/diary**", timeout=120000)
-            except:
-                page.wait_for_url("**/home**", timeout=60000)
-            
-            # 获取并保存 Cookies
-            cookies = context.cookies()
-            with open("cookies.json", "w") as f:
-                json.dump(cookies, f, indent=2)
-            
-            browser.close()
-            return "登录成功！Cookies 已更新并刷新。您可以继续记录饮食了。"
-            
-    except Exception as exc:
-        return f"登录失败: {exc}"
+        # 强制重置单例
+        global adapter
+        adapter = None
+        
+        return "🎉 手动录入成功！服务已重载并完全恢复。您可以继续进行营养录入或查询了。"
+    except Exception as e:
+        logger.error("手动导入 Cookie 失败: {}", e)
+        return f"导入失败：解析 JSON 时出错。请确保粘贴的是完整且格式正确的 JSON。错误信息: {e}"
 
 @mcp.tool()
 def get_nutrition_trends(days: int = 7) -> str:
     """
-    Get nutrition trends for the last N days.
-    获取最近 N 天的营养趋势分析。
+    Get nutrition trends for the last N days with high-fidelity micronutrients.
+    获取最近 N 天的营养趋势分析，结合 MFP 宏量与本地高保真微量元素。
     
     Args:
-        days (int): Number of days to analyze. | 需分析的天数（默认7天）。
+        days (int): Number of days to analyze (default 7). | 需分析的天数（默认7天）。
     """
     try:
         mfp = get_adapter()
@@ -554,11 +841,17 @@ def get_nutrition_trends(days: int = 7) -> str:
         end_date = datetime.now()
         trends = []
         
+        # 定义哪些是 MFP 已经统计过的标准字段 (避开在本地日志重复叠加)
+        MFP_STANDARD_FIELDS = ["protein", "carbs", "fat", "calories", "sodium", "potassium", "iron", "calcium", "vitamin_a", "vitamin_c"]
+        
         for i in range(days):
             date_str = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
             data = mfp.get_diary_data(date_str)
             
-            day_stats = {"date": date_str, "calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "sodium": 0.0}
+            # 1. 基础宏量统计 (来自 MFP 官方数据，确保包含用户手动录入项)
+            day_stats = {"date": date_str, "calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+            
+            # 计算 MFP 统计的总和 (遍历 diary_meal 项)
             for item in data.get("items", []):
                 if item.get("type") == "diary_meal":
                     nc = item.get("nutritional_contents", {})
@@ -566,11 +859,56 @@ def get_nutrition_trends(days: int = 7) -> str:
                     day_stats["protein"] += nc.get("protein", 0)
                     day_stats["carbs"] += nc.get("carbohydrates", 0)
                     day_stats["fat"] += nc.get("fat", 0)
-                    day_stats["sodium"] += nc.get("sodium", 0)
+                    # 同时抓取 MFP 支持的其他标准微量元素
+                    for field in ["sodium", "potassium", "iron", "calcium", "vitamin_a", "vitamin_c"]:
+                        if field in nc:
+                            day_stats[field] = day_stats.get(field, 0.0) + nc[field]
+            
+            # 2. 高保真微量元素增强 (来自本地 Journal)
+            if os.path.exists(mfp.JOURNAL_FILE):
+                try:
+                    with open(mfp.JOURNAL_FILE, "r", encoding="utf-8") as f:
+                        all_logs = json.load(f)
+                        day_logs = [log for log in all_logs if log.get("date") == date_str]
+                        for log in day_logs:
+                            for meal_item in log.get("items", []):
+                                micros = meal_item.get("macros", {}) # 补剂配置中的微量元素
+                                for k, v in micros.items():
+                                    # 核心优化：只累加 MFP 无法统计的非标元素 (如 magnesium, zinc, epa_dha)
+                                    if k not in MFP_STANDARD_FIELDS:
+                                        day_stats[k] = day_stats.get(k, 0.0) + float(v)
+                except Exception as e:
+                    logger.warning("日期 {} 本地日志解析失败: {}", date_str, e)
+
             trends.append(day_stats)
             
-        return f"过去 {days} 天的营养趋势数据: {json.dumps(trends, indent=2, ensure_ascii=False)}"
+        # 3. 视觉优化：转换为 Markdown 表格
+        if not trends:
+            return "没有找到趋势数据。"
+            
+        # 整理表头：获取所有出现的 Key 并排序 (日期在前，宏量其次，微量在后)
+        all_keys = set()
+        for t in trends: all_keys.update(t.keys())
+        
+        core_cols = ["date", "calories", "protein", "carbs", "fat"]
+        micro_cols = sorted([k for k in all_keys if k not in core_cols])
+        headers = core_cols + micro_cols
+        
+        # 如果列数过多，只展示核心及有值的数据
+        table = "| " + " | ".join(headers) + " |\n"
+        table += "| " + " | ".join(["---"] * len(headers)) + " |\n"
+        
+        for t in reversed(trends): # 按时间正序
+            row = []
+            for h in headers:
+                val = t.get(h, 0.0)
+                if isinstance(val, float): val = round(val, 1)
+                row.append(str(val))
+            table += "| " + " | ".join(row) + " |\n"
+            
+        return f"### 📊 过去 {days} 天趋势分析 (高保真数据)\n\n{table}\n\n> 注：宏量元素来自 MFP，微量元素结合了本地高保真日志。"
     except Exception as exc:
+        logger.error("趋势分析失败: {}", exc)
         return f"获取趋势失败: {exc}"
 
 @mcp.tool()
@@ -723,4 +1061,70 @@ def record_water(ml: int, date_str: str) -> str:
         return f"成功记录饮水量: {ml}ml ({date_str})。"
     except Exception as exc: return f"失败: {exc}"
 
-if __name__ == "__main__": mcp.run()
+@mcp.tool()
+def lookup_food_nutrition(query: str) -> str:
+    """
+    Look up detailed nutrition data (including micronutrients) from the local USDA FoodData Central
+    SQLite database (usda_core.db).
+    从本地 USDA 权威食物数据库查询完整营养数据（含微量元素）。
+
+    ## ⚠️ MANDATORY CONSTRAINT: query MUST be in English
+
+    The underlying FTS5 full-text index only understands English tokens.
+    Passing Chinese, Japanese, Spanish, French, or any non-English text will
+    return ZERO results even if the food exists in the database.
+
+    ## Language Translation Reference (MUST translate before calling)
+
+    | User language input          | Correct English query       |
+    |------------------------------|-----------------------------|
+    | 苹果 / Manzana / りんご       | Apple                       |
+    | 鸡蛋 / Huevo / Ei / Œuf      | Egg                         |
+    | 牛肉 / Boeuf / Carne de res  | Beef                        |
+    | 鸡胸肉 / Pechuga / 鳥胸肉    | Chicken Breast              |
+    | 三文鱼 / Salmón / サーモン    | Salmon                      |
+    | 糙米 / Arroz integral        | Brown Rice                  |
+    | 全麦面包 / Pain complet      | Whole Wheat Bread           |
+    | 菠菜 / Espinaca / Épinard    | Spinach                     |
+    | 牛油果 / Aguacate / Avocat   | Avocado                     |
+    | 花椰菜 / Brocoli             | Broccoli                    |
+    | 燕麦 / Avena / Flocons d'avoine | Oats                     |
+    | 香蕉 / Plátano / Banane      | Banana                      |
+    | 西红柿 / Tomate / トマト      | Tomato                      |
+    | 猪肉 / Cerdo / Porc          | Pork                        |
+    | 杏仁 / Almendra / Amande     | Almond                      |
+    | 豆腐 / Tofu / 두부           | Tofu                        |
+
+    ## When NOT to call this tool
+    Do NOT call this tool for regional dishes that are unlikely to exist in USDA:
+    - 宫保鸡丁, 佛跳墙, 打抛猪肉饭 → Use AI estimation with a full Dict instead.
+    - Paella, Rendang, Biryani → AI estimation preferred.
+    - Any dish with a sauce, braise, or complex spice mix → AI estimation.
+
+    ## Unit Normalization
+    Results are per 100g. To get actual nutritional values:
+      actual_value = usda_per_100g_value × (actual_grams / 100)
+    Common conversions before determining actual_grams:
+      1 oz = 28.35g | 1 cup ≈ 240g (liquid) | 1 tbsp ≈ 15g | 1 tsp ≈ 5g
+
+    Args:
+        query (str): Food name in English ONLY (e.g., "chicken breast", "brown rice").
+                     NEVER pass Chinese or other non-English characters here.
+                     | 食物英文名称（严禁传入中文或其他非英文字符）。
+    """
+    try:
+        client = USDAClient()
+        results = client.search(query, page_size=3)
+        if not results:
+            return f"未找到 '{query}' 的 USDA 数据。请尝试更通用的英文名称。"
+        return f"USDA 查询结果 (每 100g): {json.dumps(results, indent=2, ensure_ascii=False)}"
+    except Exception as exc:
+        return f"USDA 查询失败: {exc}"
+
+
+def main():
+    """MCP Server Entry Point."""
+    mcp.run()
+
+if __name__ == "__main__":
+    main()

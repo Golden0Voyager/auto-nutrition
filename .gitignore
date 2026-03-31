@@ -11,6 +11,8 @@ venv.bak/
 cookies.json
 .pdca-status.json
 test_user_input.py
+nutrition_journal.json
+tmp/
 __pycache__/
 *.py[cod]
 *$py.class
