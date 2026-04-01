@@ -78,16 +78,46 @@ class SessionExpiredError(Exception):
     pass
 
 class USDALocalResolver:
-    """
-    本地 USDA 数据库查询引擎，使用 SQLite FTS5 全文索引实现。
+    """Local USDA database query engine with full nutrient support.
+
+    Supports both the new normalized schema (foods/nutrients/food_nutrients)
+    and the legacy flat schema for backward compatibility.
     """
     DB_PATH = Path("usda_core.db")
 
-    def __init__(self):
-        # 预加载字段映射，保持逻辑与原 USDAClient 一致
-        self.fields = ["energy", "protein", "carbs", "fat", "sodium", "potassium", "fiber", "sugar"]
+    # USDA nutrient_id -> (our_field_name, original_unit)
+    # These field names align with _create_custom_food's field_map
+    NUTRIENT_MAP: Dict[int, tuple] = {
+        1008: ("energy", "kcal"),
+        1003: ("protein", "g"),
+        1005: ("carbs", "g"),
+        1004: ("fat", "g"),
+        1093: ("sodium", "mg"),
+        1092: ("potassium", "mg"),
+        1087: ("calcium", "mg"),
+        1089: ("iron", "mg"),
+        1079: ("fiber", "g"),
+        2000: ("sugar", "g"),
+        1258: ("saturated_fat", "g"),
+        1253: ("cholesterol", "mg"),
+        1106: ("vitamin_a", "mcg"),     # RAE
+        1162: ("vitamin_c", "mg"),
+        1114: ("vitamin_d", "mcg"),
+        1293: ("polyunsaturated_fat", "g"),
+        1292: ("monounsaturated_fat", "g"),
+        1257: ("trans_fat", "g"),
+    }
 
-    # 常用多语言食材英文映射表（用于检测到非英文输入时给出诊断提示）
+    # MFP expects %DV for these fields; convert from absolute values
+    DV_BASES: Dict[str, float] = {
+        "calcium": 1300.0,   # mg
+        "iron": 18.0,        # mg
+        "vitamin_a": 900.0,  # mcg RAE
+        "vitamin_c": 90.0,   # mg
+        "vitamin_d": 20.0,   # mcg
+    }
+
+    # Language guard hints for common non-English food names
     LANG_GUARD_HINTS = {
         "苹果": "Apple", "鸡蛋": "Egg", "牛肉": "Beef", "鸡胸肉": "Chicken Breast",
         "三文鱼": "Salmon", "糙米": "Brown Rice", "菠菜": "Spinach", "牛油果": "Avocado",
@@ -96,101 +126,139 @@ class USDALocalResolver:
     }
 
     def search(self, query: str, page_size: int = 3) -> List[Dict[str, Any]]:
-        """在本地 FTS5 虚拟表中进行极速全文搜索。
+        """Full-text search with complete nutrient profiles.
 
-        IMPORTANT: query MUST be in English for the FTS5 index to work correctly.
-        Non-English input will yield 0 results. The caller (LLM) is responsible
-        for translating all food names to English before invoking this method.
+        Returns per-100g data. The caller should multiply by serving_ratio.
+        IMPORTANT: query MUST be in English for FTS5 to work.
         """
-        # 语言守卫：检测非 ASCII 输入（中文、日文等），发出强警告
+        # Language guard
         has_non_ascii = any(ord(c) > 127 for c in query)
         if has_non_ascii:
             hint = next(
                 (eng for cn, eng in self.LANG_GUARD_HINTS.items() if cn in query),
                 None,
             )
-            hint_msg = f" 建议英文词: '{hint}'" if hint else " 请将食物名翻译为英文后重试。"
+            hint_msg = f" Suggested: '{hint}'" if hint else " Please translate to English."
             logger.warning(
-                "[USDA语言守卫] 检测到非英文查询词: '{}' — USDA FTS5 仅支持英文，命中率将为 0！{}",
-                query,
-                hint_msg,
+                "[USDA Language Guard] Non-English query: '{}' -- FTS5 requires English!}",
+                query, hint_msg,
             )
 
         if not self.DB_PATH.exists():
-            logger.warning("本地 USDA 数据库不存在，将跳过 Level 2 检索。")
+            logger.warning("Local USDA database not found, skipping Level 2.")
             return []
 
         try:
             conn = sqlite3.connect(self.DB_PATH)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            # 使用 SQLite FTS5 进行 BM25 相关性排序搜索
-            # 处理 query 增加通配符
-            processed_query = ' '.join([f"{word}*" for word in re.findall(r'\w+', query)])
-            
-            sql = f"""
-                SELECT f.*, rank
-                FROM foods f
-                JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
-                WHERE foods_fts MATCH ?
-                ORDER BY rank
-                LIMIT ?
-            """
-            cursor.execute(sql, (processed_query, page_size))
-            rows = cursor.fetchall()
-            conn.close()
 
-            results = []
-            for row in rows:
-                # 转换为 MFP 适配器需要的格式
-                results.append({
-                    "name": row["description"],
-                    "calories_per_100g": row["energy"],
-                    "macros_per_100g": {
-                        "protein": row["protein"],
-                        "carbs": row["carbs"],
-                        "fat": row["fat"],
-                        "sodium": row["sodium"],
-                        "potassium": row["potassium"],
-                        "fiber": row["fiber"],
-                        "sugar": row["sugar"]
-                    }
-                })
+            processed_query = ' '.join([f"{word}*" for word in re.findall(r'\w+', query)])
+
+            # Auto-detect schema: normalized (new) vs flat (legacy)
+            has_normalized = cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='food_nutrients'"
+            ).fetchone()
+
+            if has_normalized:
+                results = self._search_normalized(cursor, processed_query, page_size)
+            else:
+                results = self._search_legacy(cursor, processed_query, page_size)
+
+            conn.close()
             return results
         except Exception as e:
-            logger.error("本地 USDA 检索失败: {}", e)
+            logger.error("USDA search failed: {}", e)
             return []
-        nutrients_raw = {}
-        for fn in food.get("foodNutrients", []):
-            nid = fn.get("nutrientId")
-            val = fn.get("value")
-            if nid and val is not None:
-                nutrients_raw[nid] = val
 
-        calories = nutrients_raw.get(1008, 0)
-        macros = {}
+    def _search_normalized(self, cursor, query: str, page_size: int) -> List[Dict[str, Any]]:
+        """Query the normalized schema with full nutrient profiles."""
+        cursor.execute(
+            """
+            SELECT f.fdc_id, f.description, rank
+            FROM foods f
+            JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
+            WHERE foods_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, page_size),
+        )
+        food_rows = cursor.fetchall()
 
-        for nid, (field_name, unit) in self.NUTRIENT_MAP.items():
-            if nid == 1008:
-                continue
-            val = nutrients_raw.get(nid)
-            if val is None:
-                continue
-            # %DV 字段需要单位转换
-            if unit == "%DV" and field_name in self.DV_BASES:
-                val = round(val / self.DV_BASES[field_name] * 100, 1)
-            else:
-                val = round(val, 2)
-            macros[field_name] = val
+        target_nids = set(self.NUTRIENT_MAP.keys())
+        results = []
 
-        return {
-            "name": food.get("description", "Unknown"),
-            "fdcId": food.get("fdcId"),
-            "dataType": food.get("dataType"),
-            "calories_per_100g": round(calories, 1),
-            "macros_per_100g": macros,
-        }
+        for food in food_rows:
+            fdc_id = food["fdc_id"]
+
+            # Get all nutrients for this food in one query
+            cursor.execute(
+                "SELECT nutrient_id, amount FROM food_nutrients WHERE fdc_id = ?",
+                (fdc_id,),
+            )
+
+            calories = 0.0
+            macros: Dict[str, float] = {}
+
+            for nrow in cursor.fetchall():
+                nid = nrow["nutrient_id"]
+                if nid not in target_nids:
+                    continue
+                amount = nrow["amount"]
+                field_name, _ = self.NUTRIENT_MAP[nid]
+
+                if field_name == "energy":
+                    calories = round(amount, 1)
+                    continue
+
+                # Convert absolute values to %DV where MFP expects it
+                if field_name in self.DV_BASES:
+                    amount = round(amount / self.DV_BASES[field_name] * 100, 1)
+                else:
+                    amount = round(amount, 2)
+                macros[field_name] = amount
+
+            results.append({
+                "name": food["description"],
+                "calories_per_100g": calories,
+                "macros_per_100g": macros,
+            })
+
+        return results
+
+    def _search_legacy(self, cursor, query: str, page_size: int) -> List[Dict[str, Any]]:
+        """Backward-compatible query for the old flat schema."""
+        cursor.execute(
+            """
+            SELECT f.*, rank
+            FROM foods f
+            JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
+            WHERE foods_fts MATCH ?
+            ORDER BY rank
+            LIMIT ?
+            """,
+            (query, page_size),
+        )
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "name": row["description"],
+                "calories_per_100g": row["energy"],
+                "macros_per_100g": {
+                    "protein": row["protein"],
+                    "carbs": row["carbs"],
+                    "fat": row["fat"],
+                    "sodium": row["sodium"],
+                    "potassium": row["potassium"],
+                    "fiber": row["fiber"],
+                    "sugar": row["sugar"],
+                },
+            })
+        return results
+
+
+
 
 
 class MFPAdapter:
@@ -429,15 +497,50 @@ class MFPAdapter:
         return item
 
     def _parse_quantity(self, text: str) -> tuple[float, str, str]:
-        """从字符串中解析份量、单位和食物名称。例如 '100g 酱牛肉' -> (1.0, '100g', '酱牛肉')"""
-        # 匹配数字+单位（如 100g, 3片, 2个, 1.5勺）
-        match = re.match(r'^([\d\.]+)\s*([a-zA-Z\u4e00-\u9fa5]+)\s*(.*)$', text.strip())
+        """Parse quantity, unit, and food name from a string.
+        
+        Examples:
+            '100g Chicken Breast' -> (1.0, '100g', 'Chicken Breast')
+            '300ml Whole Milk'    -> (3.0, '300ml', 'Whole Milk')
+            '1 Banana'            -> (1.0, '1', 'Banana')
+            '300ml牛奶'            -> (3.0, '300ml', '牛奶')
+        """
+        match = re.match(r'^([\d\.]+)\s*(.*)$', text.strip())
         if match:
-            qty, unit, name = match.groups()
-            # 如果单位是 g，则按 /100 进行 ratio 计算
-            ratio = float(qty) / 100.0 if unit.lower() == 'g' else float(qty)
-            return ratio, f"{qty}{unit}", name
+            qty_str, rest = match.groups()
+            qty_f = float(qty_str)
+            unit = ''
+            name = rest.strip()
+            
+            KNOWN_UNITS = {'g', 'ml', 'oz', 'lb', 'kg', '个', '根', '片', '块', '份', '勺', '杯', 'cup', 'tsp', 'tbsp', 'serving', 'servings'}
+            for u in sorted(KNOWN_UNITS, key=len, reverse=True):
+                if rest.lower().startswith(u.lower()):
+                    remain = rest[len(u):]
+                    if remain == '' or remain.startswith(' ') or u.lower() in {'g', 'ml', 'oz', 'lb', 'kg'}:
+                        unit = rest[:len(u)]
+                        name = remain.strip()
+                        break
+
+            unit_lower = unit.lower()
+            
+            # 重量/容量单位 → 统一换算为"每100g"的 ratio
+            if unit_lower == 'g':
+                ratio = qty_f / 100.0
+            elif unit_lower == 'ml':
+                ratio = qty_f / 100.0
+            elif unit_lower == 'oz':
+                ratio = (qty_f * 28.35) / 100.0
+            elif unit_lower == 'lb':
+                ratio = (qty_f * 453.6) / 100.0
+            elif unit_lower == 'kg':
+                ratio = (qty_f * 1000) / 100.0
+            else:
+                ratio = qty_f
+            
+            return ratio, f"{qty_str}{unit}", name
         return 1.0, "1 serving", text
+
+
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def record_nutrition(self, date_str: str, meal_type: str, items: List[Any]) -> Dict[str, Any]:
@@ -452,7 +555,12 @@ class MFPAdapter:
                 ratio, display_qty, name = self._parse_quantity(raw)
                 processed_items.append({"name": name, "serving_ratio": ratio, "display_qty": display_qty})
             elif isinstance(raw, dict):
-                processed_items.append(raw)
+                try:
+                    validated = FoodItemModel(**raw)
+                    processed_items.append(validated.model_dump(exclude_unset=True))
+                except Exception as e:
+                    logger.error("AI 提供的字典未能通过 Pydantic 校验: {}", e)
+                    raise ValueError(f"提供的食物字典校验失败，请检查必填项(name/calories/macros): {e}")
             else: # Pydantic Model
                 processed_items.append(raw.model_dump() if hasattr(raw, 'model_dump') else raw)
 
@@ -486,6 +594,7 @@ class MFPAdapter:
                 expanded_items.append(raw_item)
 
         results = []
+        processed_items = []
         for raw_item in expanded_items:
             # Level 1: 本地配置匹配 (supplements_config.yaml)
             item = self._apply_config_safeguard(raw_item)
@@ -511,6 +620,8 @@ class MFPAdapter:
             if "macros" not in item:
                 item["macros"] = {}
 
+            processed_items.append(item)
+
             try:
                 time.sleep(0.5)
                 food_ref = self._create_custom_food(item)
@@ -533,7 +644,7 @@ class MFPAdapter:
                 logger.error('录入 "{name}" 失败: {error}', name=item["name"], error=e)
         
         # --- 本地高保真日志记录 ---
-        self._log_to_local_journal(date_str, meal_name, expanded_items)
+        self._log_to_local_journal(date_str, meal_name, processed_items)
         
         return {"status": "ok", "count": len(results)}
 
@@ -718,62 +829,32 @@ def get_daily_summary(date: str) -> str:
 
         cal_remaining = cal_goal - cal_eaten + cal_burned
         
+        
+        # 用户体征数据 (原 get_user_metadata 功能)
+        user_section = ""
+        try:
+            weight_resp = mfp.session.get(f"{mfp.BASE_URL}/measurements?type=weight")
+            weight_resp.raise_for_status()
+            weights = weight_resp.json().get("items", [])
+            if weights:
+                latest_weight = weights[0].get("value")
+                user_section = f"\n👤 当前体重: {latest_weight}kg"
+        except Exception:
+            pass
+
         output = (
             f"📅 {date} 营养预算总结:\n"
             f"🔥 卡路里: {round(cal_goal)} (目标) - {round(cal_eaten)} (已吃) + {round(cal_burned)} (运动) = {round(cal_remaining)} (剩余)\n"
             f"🥩 蛋白质剩余: {round(max(0, protein_goal - protein_eaten), 1)}g\n"
             f"🍞 碳水剩余: {round(max(0, carbs_goal - carbs_eaten), 1)}g\n"
             f"🥑 脂肪剩余: {round(max(0, fat_goal - fat_eaten), 1)}g\n\n"
-            f"💡 建议: 您今天目前的‘可用余额’剩余 {round(cal_remaining)} kcal。"
+            f"💡 建议: 您今天目前的'可用余额'剩余 {round(cal_remaining)} kcal。"
+            f"{user_section}"
         )
         return output
     except Exception as exc: return f"获取总结失败: {exc}"
 
-@mcp.tool()
-def get_user_metadata() -> str:
-    """
-    Get the user's latest biometric data (weight, height, age) for calorie linkage.
-    获取用户最新的生物特征数据（体重、身高、年龄）用于热量联动。
-    
-    Args:
-        None | 无
-    """
-    try:
-        mfp = get_adapter()
-        mfp._ensure_token_valid()
-        
-        # 1. 获取最新体重
-        weight_resp = mfp.session.get(f"{mfp.BASE_URL}/measurements?type=weight")
-        weight_resp.raise_for_status()
-        weights = weight_resp.json().get("items", [])
-        latest_weight = weights[0].get("value") if weights else 70.0 # 默认 70kg
-        
-        # 2. 获取用户基础资料 (年龄/身高)
-        # 注意: 某些账户权限可能受限，如果失败则返回保底
-        meta = {"weight_kg": latest_weight, "height_cm": 175, "age": 30}
-        try:
-            if mfp.user_id:
-                user_resp = mfp.session.get(f"{mfp.BASE_URL}/users/{mfp.user_id}")
-                user_resp.raise_for_status()
-                u_data = user_resp.json().get("item", {})
-                meta["height_cm"] = u_data.get("height", 175)
-                # 年龄通常需要通过生日计算，或者从 profile 中取
-                meta["username"] = u_data.get("username")
-        except:
-            pass
-            
-        return f"当前用户信息: {json.dumps(meta, ensure_ascii=False)}"
-    except Exception as exc:
-        return f"获取用户信息失败: {exc}"
 
-@mcp.tool()
-async def refresh_login(username: Optional[str] = None, password: Optional[str] = None) -> str:
-    """
-    [DEPRECATED] Automated login is blocked by Cloudflare. This tool now returns the manual cookie import guide.
-    由于 Cloudflare 的拦截，自动登录流程已废弃。此工具现直接返回手动导入 Cookie 的详细指南，引导大家使用手动方式绕过。
-    """
-    logger.warning("自动登录流程已被禁用（Cloudflare拦截）。直接向调用者返回手动导入 Cookie 的指南。")
-    return get_cookie_guide()
 
 @mcp.tool()
 def get_cookie_guide() -> str:
@@ -844,6 +925,15 @@ def get_nutrition_trends(days: int = 7) -> str:
         # 定义哪些是 MFP 已经统计过的标准字段 (避开在本地日志重复叠加)
         MFP_STANDARD_FIELDS = ["protein", "carbs", "fat", "calories", "sodium", "potassium", "iron", "calcium", "vitamin_a", "vitamin_c"]
         
+        # 高耗时：预加载本地日志将其提至循环外科
+        all_logs = []
+        if os.path.exists(mfp.JOURNAL_FILE):
+            try:
+                with open(mfp.JOURNAL_FILE, "r", encoding="utf-8") as f:
+                    all_logs = json.load(f)
+            except Exception as e:
+                logger.warning("预加载本地日志失败: {}", e)
+        
         for i in range(days):
             date_str = (end_date - timedelta(days=i)).strftime("%Y-%m-%d")
             data = mfp.get_diary_data(date_str)
@@ -864,21 +954,16 @@ def get_nutrition_trends(days: int = 7) -> str:
                         if field in nc:
                             day_stats[field] = day_stats.get(field, 0.0) + nc[field]
             
-            # 2. 高保真微量元素增强 (来自本地 Journal)
-            if os.path.exists(mfp.JOURNAL_FILE):
-                try:
-                    with open(mfp.JOURNAL_FILE, "r", encoding="utf-8") as f:
-                        all_logs = json.load(f)
-                        day_logs = [log for log in all_logs if log.get("date") == date_str]
-                        for log in day_logs:
-                            for meal_item in log.get("items", []):
-                                micros = meal_item.get("macros", {}) # 补剂配置中的微量元素
-                                for k, v in micros.items():
-                                    # 核心优化：只累加 MFP 无法统计的非标元素 (如 magnesium, zinc, epa_dha)
-                                    if k not in MFP_STANDARD_FIELDS:
-                                        day_stats[k] = day_stats.get(k, 0.0) + float(v)
-                except Exception as e:
-                    logger.warning("日期 {} 本地日志解析失败: {}", date_str, e)
+            # 2. 高保真微量元素增强 (来自预加载的本地 Journal)
+            if all_logs:
+                day_logs = [log for log in all_logs if log.get("date") == date_str]
+                for log in day_logs:
+                    for meal_item in log.get("items", []):
+                        micros = meal_item.get("macros", {}) # 补剂配置中的微量元素
+                        for k, v in micros.items():
+                            # 核心优化：只累加 MFP 无法统计的非标元素 (如 magnesium, zinc, epa_dha)
+                            if k not in MFP_STANDARD_FIELDS:
+                                day_stats[k] = day_stats.get(k, 0.0) + float(v)
 
             trends.append(day_stats)
             
@@ -1030,36 +1115,28 @@ def record_exercise(exercise: ExerciseModel) -> str:
         return f"记录运动失败: {exc}"
 
 @mcp.tool()
-def record_weight(weight_kg: float, date: str) -> str:
+def record_measurement(measurement_type: str, value: float, date: str) -> str:
     """
-    Record body weight (kg).
-    记录体重（公斤）。
+    Record body weight (kg) or water intake (ml).
+    记录体重（公斤）或饮水量（毫升）。
     
     Args:
-        weight_kg (float): Weight in kilograms. | 体重（公斤）。
+        measurement_type (str): 'weight' or 'water'. | 'weight'(体重) 或 'water'(饮水)。
+        value (float): Weight in kg or water in ml. | 体重(kg)或饮水量(ml)。
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
     """
     try:
         mfp = get_adapter()
-        mfp.record_weight(weight_kg, date)
-        return f"体重 {weight_kg}kg 记录成功 ({date})。"
-    except Exception as exc: return f"失败: {exc}"
-
-@mcp.tool()
-def record_water(ml: int, date_str: str) -> str:
-    """
-    Record water intake (ml).
-    记录饮水量（毫升）。
-    
-    Args:
-        ml (int): Water amount in milliliters. | 饮水量（毫升）。
-        date_str (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
-    """
-    try:
-        mfp = get_adapter()
-        mfp.record_water(ml, date_str)
-        return f"成功记录饮水量: {ml}ml ({date_str})。"
-    except Exception as exc: return f"失败: {exc}"
+        if measurement_type.lower() == "weight":
+            mfp.record_weight(value, date)
+            return f"体重 {value}kg 记录成功 ({date})。"
+        elif measurement_type.lower() == "water":
+            mfp.record_water(int(value), date)
+            return f"成功记录饮水量: {int(value)}ml ({date})。"
+        else:
+            return f"未知类型 '{measurement_type}'，请使用 'weight' 或 'water'。"
+    except Exception as exc:
+        return f"失败: {exc}"
 
 @mcp.tool()
 def lookup_food_nutrition(query: str) -> str:
@@ -1113,8 +1190,8 @@ def lookup_food_nutrition(query: str) -> str:
                      | 食物英文名称（严禁传入中文或其他非英文字符）。
     """
     try:
-        client = USDAClient()
-        results = client.search(query, page_size=3)
+        resolver = USDALocalResolver()
+        results = resolver.search(query, page_size=3)
         if not results:
             return f"未找到 '{query}' 的 USDA 数据。请尝试更通用的英文名称。"
         return f"USDA 查询结果 (每 100g): {json.dumps(results, indent=2, ensure_ascii=False)}"

@@ -1,127 +1,231 @@
-import os
+"""USDA FoodData Central full-nutrient ingest script.
+
+Downloads Foundation Foods and SR Legacy datasets, then imports ALL nutrients
+into a normalized SQLite schema for comprehensive nutrition queries.
+
+Schema:
+  foods(fdc_id, description, data_type)
+  nutrients(nutrient_id, name, unit_name)
+  food_nutrients(fdc_id, nutrient_id, amount)   ← ALL data points
+  foods_fts(description, fdc_id)                ← FTS5 full-text index
+"""
+
 import sqlite3
 import zipfile
-import requests
 import csv
 import io
+import sys
+
+import requests
 from loguru import logger
 from pathlib import Path
 
-# USDA Core Data URLs (Latest as of Dec 2025/Historical SR Legacy)
+# USDA FoodData Central CSV download URLs
 USDA_URLS = {
     "foundation": "https://fdc.nal.usda.gov/fdc-datasets/FoodData_Central_foundation_food_csv_2024-10-31.zip",
-    "sr_legacy": "https://fdc.nal.usda.gov/fdc-datasets/FoodData_Central_sr_legacy_food_csv_2018-04-20.zip"
+    "sr_legacy": "https://fdc.nal.usda.gov/fdc-datasets/FoodData_Central_sr_legacy_food_csv_2018-04.zip",
 }
 
-# 核心营养素 ID 映射 (与 mfp_adapter.py 一致)
-NUTRIENT_IDS = {
-    '1008': 'energy',
-    '1003': 'protein',
-    '1005': 'carbs',
-    '1004': 'fat',
-    '1093': 'sodium',
-    '1092': 'potassium',
-    '1087': 'calcium',
-    '1089': 'iron',
-    '1079': 'fiber',
-    '2000': 'sugar',
-    '1258': 'saturated_fat',
-    '1001': 'cholesterol' # or 1253
-}
+DB_PATH = Path(__file__).resolve().parent.parent / "usda_core.db"
+BATCH_SIZE = 10000
 
-DB_PATH = Path("usda_core.db")
 
-def setup_db(conn):
+def setup_db(conn: sqlite3.Connection) -> None:
+    """Create normalized schema with 3 core tables + FTS5 index."""
     cursor = conn.cursor()
+
+    cursor.execute("DROP TABLE IF EXISTS food_nutrients")
+    cursor.execute("DROP TABLE IF EXISTS nutrients")
     cursor.execute("DROP TABLE IF EXISTS foods")
+    cursor.execute("DROP TABLE IF EXISTS foods_fts")
+
     cursor.execute("""
         CREATE TABLE foods (
             fdc_id INTEGER PRIMARY KEY,
-            description TEXT,
-            data_type TEXT,
-            energy REAL DEFAULT 0,
-            protein REAL DEFAULT 0,
-            carbs REAL DEFAULT 0,
-            fat REAL DEFAULT 0,
-            sodium REAL DEFAULT 0,
-            potassium REAL DEFAULT 0,
-            fiber REAL DEFAULT 0,
-            sugar REAL DEFAULT 0
+            description TEXT NOT NULL,
+            data_type TEXT
         )
     """)
-    # 建立全文搜索索引
-    cursor.execute("DROP TABLE IF EXISTS foods_fts")
-    cursor.execute("CREATE VIRTUAL TABLE foods_fts USING fts5(description, fdc_id UNINDEXED)")
+
+    cursor.execute("""
+        CREATE TABLE nutrients (
+            nutrient_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            unit_name TEXT
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE food_nutrients (
+            fdc_id INTEGER NOT NULL,
+            nutrient_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            PRIMARY KEY (fdc_id, nutrient_id)
+        )
+    """)
+
+    cursor.execute(
+        "CREATE VIRTUAL TABLE foods_fts USING fts5(description, fdc_id UNINDEXED)"
+    )
+
+    conn.commit()
+    logger.info("Database schema created (normalized 3-table design).")
+
+
+def ingest_zip(url: str, conn: sqlite3.Connection) -> None:
+    """Download a USDA CSV zip and import all data."""
+    logger.info("Downloading: {}", url.split("/")[-1])
+    resp = requests.get(url, timeout=180, stream=False)
+    resp.raise_for_status()
+    logger.info("Download complete ({:.1f} MB), parsing...", len(resp.content) / 1e6)
+
+    cursor = conn.cursor()
+
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+        file_list = z.namelist()
+        food_file = next(f for f in file_list if f.split("/")[-1] == "food.csv")
+        nutrient_file = next(
+            f for f in file_list if f.split("/")[-1] == "food_nutrient.csv"
+        )
+        nutrient_def_file = next(
+            (f for f in file_list if f.split("/")[-1] == "nutrient.csv"), None
+        )
+
+        # ── 1. Nutrient definitions ──
+        if nutrient_def_file:
+            logger.info("Importing nutrient definitions: {}", nutrient_def_file)
+            count = 0
+            with z.open(nutrient_def_file) as f:
+                reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+                for row in reader:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO nutrients (nutrient_id, name, unit_name) VALUES (?, ?, ?)",
+                        (int(row["id"]), row["name"], row.get("unit_name", "")),
+                    )
+                    count += 1
+            logger.info("  → {} nutrient definitions imported.", count)
+
+        # ── 2. Food items ──
+        logger.info("Importing food items: {}", food_file)
+        food_ids = set()
+        with z.open(food_file) as f:
+            reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+            for row in reader:
+                fdc_id = int(row["fdc_id"])
+                desc = row["description"]
+                data_type = row.get("data_type", "SR Legacy")
+                cursor.execute(
+                    "INSERT OR IGNORE INTO foods (fdc_id, description, data_type) VALUES (?, ?, ?)",
+                    (fdc_id, desc, data_type),
+                )
+                cursor.execute(
+                    "INSERT INTO foods_fts (description, fdc_id) VALUES (?, ?)",
+                    (desc, fdc_id),
+                )
+                food_ids.add(fdc_id)
+        logger.info("  → {} food items imported.", len(food_ids))
+
+        # ── 3. ALL food-nutrient data points (no filtering!) ──
+        logger.info(
+            "Importing ALL food nutrients (full extraction, may take 1-2 min): {}",
+            nutrient_file,
+        )
+        batch: list[tuple] = []
+        total = 0
+        skipped = 0
+        with z.open(nutrient_file) as f:
+            reader = csv.DictReader(io.TextIOWrapper(f, encoding="utf-8"))
+            for row in reader:
+                fdc_id = int(row["fdc_id"])
+                if fdc_id not in food_ids:
+                    skipped += 1
+                    continue
+                try:
+                    nutrient_id = int(row["nutrient_id"])
+                    amount = float(row["amount"])
+                    batch.append((fdc_id, nutrient_id, amount))
+                    total += 1
+                    if len(batch) >= BATCH_SIZE:
+                        cursor.executemany(
+                            "INSERT OR IGNORE INTO food_nutrients (fdc_id, nutrient_id, amount) VALUES (?, ?, ?)",
+                            batch,
+                        )
+                        batch = []
+                        if total % 100000 == 0:
+                            logger.info("  ... {} data points processed", total)
+                except (ValueError, TypeError):
+                    continue
+
+        if batch:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO food_nutrients (fdc_id, nutrient_id, amount) VALUES (?, ?, ?)",
+                batch,
+            )
+
+        logger.info(
+            "  → {} nutrient data points imported ({} orphan rows skipped).",
+            total,
+            skipped,
+        )
+
     conn.commit()
 
-def ingest_zip(url, conn):
-    logger.info(f"正在从 {url} 下载数据...")
-    resp = requests.get(url, timeout=60)
-    resp.raise_for_status()
-    
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
-        # 查找目标文件名（USDA 不同包里的路径可能不同），确保匹配的是根文件
-        file_list = z.namelist()
-        food_file = next(f for f in file_list if f.split('/')[-1] == "food.csv")
-        nutrient_file = next(f for f in file_list if f.split('/')[-1] == "food_nutrient.csv")
-        
-        logger.info(f"解析食物基础信息: {food_file}")
-        foods = {}
-        with z.open(food_file) as f:
-            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))
-            for row in reader:
-                fdc_id = int(row['fdc_id'])
-                foods[fdc_id] = {
-                    "description": row['description'],
-                    "data_type": row.get('data_type', 'SR Legacy'),
-                    "nutrients": {}
-                }
 
-        logger.info(f"解析营养素详情 (耗时较长): {nutrient_file}")
-        with z.open(nutrient_file) as f:
-            reader = csv.DictReader(io.TextIOWrapper(f, encoding='utf-8'))
-            for row in reader:
-                fdc_id = int(row['fdc_id'])
-                n_id = row['nutrient_id']
-                if fdc_id in foods and n_id in NUTRIENT_IDS:
-                    try:
-                        amount = float(row['amount'])
-                        foods[fdc_id]["nutrients"][NUTRIENT_IDS[n_id]] = amount
-                    except (ValueError, TypeError):
-                        continue
+def create_indexes(conn: sqlite3.Connection) -> None:
+    """Create performance indexes for fast nutrient lookups."""
+    logger.info("Creating indexes...")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fn_fdc ON food_nutrients(fdc_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fn_nutrient ON food_nutrients(nutrient_id)"
+    )
+    conn.commit()
+    logger.info("Indexes created.")
 
-        logger.info(f"写入数据库: {len(foods)} 条记录")
-        cursor = conn.cursor()
-        for fdc_id, info in foods.items():
-            n = info["nutrients"]
-            cursor.execute("""
-                INSERT INTO foods (fdc_id, description, data_type, energy, protein, carbs, fat, sodium, potassium, fiber, sugar)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                fdc_id, info["description"], info["data_type"],
-                n.get("energy", 0), n.get("protein", 0), n.get("carbs", 0), n.get("fat", 0),
-                n.get("sodium", 0), n.get("potassium", 0), n.get("fiber", 0), n.get("sugar", 0)
-            ))
-            cursor.execute("INSERT INTO foods_fts (description, fdc_id) VALUES (?, ?)", (info["description"], fdc_id))
-        conn.commit()
 
-def main():
-    conn = sqlite3.connect(DB_PATH)
+def main() -> None:
+    """Entry point: build full USDA local database."""
+    logger.remove()
+    logger.add(sys.stderr, format="<green>{time:HH:mm:ss}</green> | {message}")
+
+    logger.info("=== USDA Full-Nutrient Database Builder ===")
+    logger.info("Target: {}", DB_PATH)
+
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=OFF")  # Speed up bulk import
+
     setup_db(conn)
-    
+
     try:
-        # 下载 Foundation Foods
-        ingest_zip(USDA_URLS["foundation"], conn)
-        # 下载 SR Legacy
-        ingest_zip(USDA_URLS["sr_legacy"], conn)
-        
-        logger.info("🎉 USDA 本地数据库构建完成！")
-        # 优化数据库体积
+        for name, url in USDA_URLS.items():
+            logger.info("--- Processing dataset: {} ---", name)
+            ingest_zip(url, conn)
+
+        create_indexes(conn)
+
+        # Final stats
+        foods_count = conn.execute("SELECT COUNT(*) FROM foods").fetchone()[0]
+        nutrients_count = conn.execute("SELECT COUNT(*) FROM nutrients").fetchone()[0]
+        fn_count = conn.execute("SELECT COUNT(*) FROM food_nutrients").fetchone()[0]
+        db_size_mb = DB_PATH.stat().st_size / 1e6
+
+        logger.info("=== Build Complete ===")
+        logger.info("  Foods:       {:,}", foods_count)
+        logger.info("  Nutrients:   {:,}", nutrients_count)
+        logger.info("  Data points: {:,}", fn_count)
+        logger.info("  DB size:     {:.1f} MB", db_size_mb)
+
+        conn.execute("PRAGMA synchronous=FULL")
         conn.execute("VACUUM")
+        logger.info(
+            "  Final size:  {:.1f} MB (after VACUUM)", DB_PATH.stat().st_size / 1e6
+        )
     except Exception as e:
-        logger.error(f"构建失败: {e}")
+        logger.error("Build failed: {}", e)
+        raise
     finally:
         conn.close()
+
 
 if __name__ == "__main__":
     main()
