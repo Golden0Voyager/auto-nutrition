@@ -47,8 +47,8 @@ class NutritionModel(BaseModel):
 
 class FoodItemModel(BaseModel):
     name: str = Field(..., description="Food name | 食物名称")
-    calories: float = Field(..., description="Calories (kcal) | 热量 (kcal)")
-    macros: NutritionModel = Field(..., description="Macro and micronutrients | 营养素指标")
+    calories: Optional[float] = Field(None, ge=0, description="Calories (kcal), optional — system will auto-lookup if omitted | 热量 (kcal)，可选——不填则自动查库")
+    macros: Optional[NutritionModel] = Field(None, description="Macro and micronutrients, optional | 营养素指标，可选")
     meal_type: Optional[str] = Field(None, description="Meal type (breakfast/lunch/dinner/snack) | 餐次类型")
     date: Optional[str] = Field(None, description="Date (YYYY-MM-DD) | 日期")
     serving_ratio: Optional[float] = Field(1.0, description="Serving size multiplier | 食用比例系数")
@@ -88,7 +88,9 @@ class USDALocalResolver:
     # USDA nutrient_id -> (our_field_name, original_unit)
     # These field names align with _create_custom_food's field_map
     NUTRIENT_MAP: Dict[int, tuple] = {
-        1008: ("energy", "kcal"),
+        1008: ("energy", "kcal"),          # 传统通用值，覆盖广
+        2047: ("energy_atwater", "kcal"),   # Atwater General Factors — 新版条目，精度中
+        2048: ("energy_atwater_sp", "kcal"),# Atwater Specific Factors — 新版条目，精度最高
         1003: ("protein", "g"),
         1005: ("carbs", "g"),
         1004: ("fat", "g"),
@@ -140,7 +142,7 @@ class USDALocalResolver:
             )
             hint_msg = f" Suggested: '{hint}'" if hint else " Please translate to English."
             logger.warning(
-                "[USDA Language Guard] Non-English query: '{}' -- FTS5 requires English!}",
+                "[USDA Language Guard] Non-English query: '{}' -- FTS5 requires English!{}",
                 query, hint_msg,
             )
 
@@ -153,7 +155,13 @@ class USDALocalResolver:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            processed_query = ' '.join([f"{word}*" for word in re.findall(r'\w+', query)])
+            # 清洗查询：只保留英文单词（去掉数字、中文、括号等干扰项），提高 FTS 命中率
+            english_words = re.findall(r'[a-zA-Z]+', query)
+            if not english_words:
+                logger.warning("[USDA] 清洗后无有效英文关键词: '{}'", query)
+                conn.close()
+                return []
+            processed_query = ' '.join([f"{word}*" for word in english_words])
 
             # Auto-detect schema: normalized (new) vs flat (legacy)
             has_normalized = cursor.execute(
@@ -173,16 +181,17 @@ class USDALocalResolver:
 
     def _search_normalized(self, cursor, query: str, page_size: int) -> List[Dict[str, Any]]:
         """Query the normalized schema with full nutrient profiles."""
+        # 排除没有营养数据的条目（如 market_acquisition / sample_food 类型）
         cursor.execute(
             """
-            SELECT f.fdc_id, f.description, rank
+            SELECT f.fdc_id, f.description
             FROM foods f
             JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
-            WHERE foods_fts MATCH ?
-            ORDER BY rank
+            WHERE fts.description MATCH ?
+              AND EXISTS (SELECT 1 FROM food_nutrients fn WHERE fn.fdc_id = f.fdc_id)
             LIMIT ?
             """,
-            (query, page_size),
+            (query, page_size * 5),  # 多查几倍，后续过滤 0 kcal 后再截断
         )
         food_rows = cursor.fetchall()
 
@@ -208,8 +217,11 @@ class USDALocalResolver:
                 amount = nrow["amount"]
                 field_name, _ = self.NUTRIENT_MAP[nid]
 
-                if field_name == "energy":
-                    calories = round(amount, 1)
+                if field_name in ("energy", "energy_atwater", "energy_atwater_sp"):
+                    # 优先级: 2048 (Specific) > 2047 (General) > 1008 (传统)
+                    # 高精度值直接覆盖低精度值
+                    if field_name == "energy_atwater_sp" or (field_name == "energy_atwater" and calories == 0.0) or (field_name == "energy" and calories == 0.0):
+                        calories = round(amount, 1)
                     continue
 
                 # Convert absolute values to %DV where MFP expects it
@@ -225,17 +237,17 @@ class USDALocalResolver:
                 "macros_per_100g": macros,
             })
 
-        return results
+        # 过滤掉无有效卡路里的条目（USDA 的 sample_food 等类型常缺失 energy 数据）
+        return [r for r in results if r["calories_per_100g"] > 0][:page_size]
 
     def _search_legacy(self, cursor, query: str, page_size: int) -> List[Dict[str, Any]]:
         """Backward-compatible query for the old flat schema."""
         cursor.execute(
             """
-            SELECT f.*, rank
+            SELECT f.*
             FROM foods f
             JOIN foods_fts fts ON f.fdc_id = fts.fdc_id
-            WHERE foods_fts MATCH ?
-            ORDER BY rank
+            WHERE fts.description MATCH ?
             LIMIT ?
             """,
             (query, page_size),
@@ -460,7 +472,9 @@ class MFPAdapter:
                 for alias in aliases:
                     if all(ord(c) < 128 for c in alias):
                         # 纯英文使用单词边界正则匹配，防止 "Gel" 匹配 "Gelatin"
-                        if re.search(r'\b' + re.escape(alias) + r'\b', name_lower):
+                        # 将下划线和空格视为等价，统一为 \s+ 或 [_\s]+ 进行匹配
+                        alias_pattern = re.escape(alias).replace(r'\_', r'[\s_]+').replace(r'\ ', r'[\s_]+')
+                        if re.search(r'\b' + alias_pattern + r'\b', name_lower):
                             matched_conf = conf
                             break
                     else:
@@ -492,6 +506,7 @@ class MFPAdapter:
                 k: round(v * ratio, 1) for k, v in combined_nutrients.items()
             }
             logger.info("应用配置保护: {} -> {}", item["name"], safe_item["name"])
+            safe_item["_config_matched"] = True
             return safe_item
             
         return item
@@ -549,18 +564,33 @@ class MFPAdapter:
         meal_name = meal_map.get(meal_type.lower(), "Snacks")
         
         # 预处理：将所有输入转为 Dict，并提取份量
+        # AI 预填的 calories/macros 暂存到 ai_ 前缀字段，清空主字段让管线完整执行
         processed_items = []
         for raw in items:
             if isinstance(raw, str):
                 ratio, display_qty, name = self._parse_quantity(raw)
-                processed_items.append({"name": name, "serving_ratio": ratio, "display_qty": display_qty})
+                # 尝试从字符串中提取 AI 预填的热量值，如 "100g Apple (52kcal)"
+                ai_cal_match = re.search(r'\((\d+(?:\.\d+)?)\s*kcal\)', raw)
+                ai_cal = float(ai_cal_match.group(1)) if ai_cal_match else None
+                processed_items.append({
+                    "name": name, 
+                    "serving_ratio": ratio, 
+                    "display_qty": display_qty,
+                    "ai_calories": ai_cal
+                })
             elif isinstance(raw, dict):
                 try:
                     validated = FoodItemModel(**raw)
-                    processed_items.append(validated.model_dump(exclude_unset=True))
+                    d = validated.model_dump(exclude_unset=True)
+                    # 暂存 AI 预填值，让管线优先查配置和 USDA
+                    if "calories" in d and d["calories"] is not None:
+                        d["ai_calories"] = d.pop("calories")
+                    if "macros" in d and d["macros"] is not None:
+                        d["ai_macros"] = d.pop("macros")
+                    processed_items.append(d)
                 except Exception as e:
                     logger.error("AI 提供的字典未能通过 Pydantic 校验: {}", e)
-                    raise ValueError(f"提供的食物字典校验失败，请检查必填项(name/calories/macros): {e}")
+                    raise ValueError(f"提供的食物字典校验失败，请检查必填项(name): {e}")
             else: # Pydantic Model
                 processed_items.append(raw.model_dump() if hasattr(raw, 'model_dump') else raw)
 
@@ -596,13 +626,18 @@ class MFPAdapter:
         results = []
         processed_items = []
         for raw_item in expanded_items:
-            # Level 1: 本地配置匹配 (supplements_config.yaml)
+            # 提取 AI 暂存值
+            ai_calories = raw_item.pop("ai_calories", None)
+            ai_macros = raw_item.pop("ai_macros", None)
+
+            # Level 1: 本地配置 (supplements_config.yaml) — 始终执行，优先级最高
             item = self._apply_config_safeguard(raw_item)
-            
-            # Level 2: USDA 外部数据库搜索 (如果本地查找后仍无数据)
-            if item.get("calories") is None or item["calories"] == 0:
+            config_matched = item.get("_config_matched", False)
+
+            # Level 2: USDA 数据库 — 配置未命中时执行
+            if not config_matched and (item.get("calories") is None or item.get("calories", 0) == 0):
                 name_for_search = item["name"]
-                logger.info("本地未匹配，尝试 USDA 搜索: {}", name_for_search)
+                logger.info("Level 2 | 本地未匹配，尝试 USDA 搜索: {}", name_for_search)
                 try:
                     usda_results = self.usda.search(name_for_search, page_size=1)
                     if usda_results:
@@ -610,13 +645,27 @@ class MFPAdapter:
                         ratio = float(item.get("serving_ratio", 1.0))
                         item["calories"] = round(top["calories_per_100g"] * ratio, 1)
                         item["macros"] = {k: round(v * ratio, 1) for k, v in top["macros_per_100g"].items()}
-                        logger.info("USDA 匹配成功: {} ({} kcal)", top["name"], item["calories"])
+                        logger.info("Level 2 | USDA 匹配成功: {} ({} kcal)", top["name"], item["calories"])
                 except Exception as e:
-                    logger.warning("USDA 搜索异常: {}", e)
+                    logger.warning("Level 2 | USDA 搜索异常: {}", e)
 
-            # Level 3: 最终兜底 (确保字段存在，防止下一步报错)
-            if item.get("calories") is None: 
+            # Level 3: AI 预填值 — 配置和 USDA 都未命中时，使用 AI 估算作为 fallback
+            if (item.get("calories") is None or item.get("calories", 0) == 0) and ai_calories:
+                item["calories"] = ai_calories
+                if ai_macros:
+                    # ai_macros 可能是 NutritionModel dict，需要提取有效字段
+                    if isinstance(ai_macros, dict):
+                        item["macros"] = {k: v for k, v in ai_macros.items() if v is not None}
+                    else:
+                        item["macros"] = ai_macros
+                logger.info("Level 3 | 使用 AI 估算数据: {} ({} kcal)", item["name"], ai_calories)
+
+            # Level 4: 兜底 — 所有数据源均未命中，标记警告
+            if item.get("calories") is None or item.get("calories", 0) == 0:
+                logger.warning('Level 4 | ⚠️ "{}" 未匹配到任何营养数据，将以 0 kcal 录入', item["name"])
                 item["calories"] = 0
+                item.setdefault("macros", {})
+                item["_unmatched"] = True
             if "macros" not in item:
                 item["macros"] = {}
 
@@ -636,7 +685,7 @@ class MFPAdapter:
                 }
                 response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
                 response.raise_for_status()
-                results.append({"name": item["name"], "calories": item["calories"]})
+                results.append({"name": item["name"], "calories": item["calories"], "unmatched": item.get("_unmatched", False)})
                 logger.info('成功录入: "{name}" ({cal} kcal)', name=item["name"], cal=item["calories"])
             except requests.exceptions.HTTPError as he:
                 logger.error('API 拒绝了 "{name}" 的请求: {error}', name=item["name"], error=he.response.text if hasattr(he, 'response') else he)
@@ -646,7 +695,11 @@ class MFPAdapter:
         # --- 本地高保真日志记录 ---
         self._log_to_local_journal(date_str, meal_name, processed_items)
         
-        return {"status": "ok", "count": len(results)}
+        unmatched = [r["name"] for r in results if r.get("unmatched")]
+        result = {"status": "ok", "count": len(results)}
+        if unmatched:
+            result["warnings"] = [f'⚠️ 以下食物未匹配到营养数据，以 0 kcal 录入: {", ".join(unmatched)}']
+        return result
 
     def _log_to_local_journal(self, date_str: str, meal_name: str, items: List[Dict[str, Any]]) -> None:
         """
@@ -682,14 +735,62 @@ class MFPAdapter:
             if 'temp_name' in locals() and os.path.exists(temp_name):
                 os.remove(temp_name)
 
-    def delete_diary_entry(self, entry_id: str) -> bool:
+    def get_food_entries_from_html(self, date_str: str) -> list:
         """
-        删除指定的日记条目。
+        从 MFP 网页端 HTML 解析出单条食物记录（含 entry ID 和所属餐次）。
+        v2 API 只返回 diary_meal 聚合数据，不含可删除的 food_entry ID。
         """
         self._ensure_token_valid()
-        endpoint = f"{self.BASE_URL}/diary/{entry_id}"
-        response = self.session.delete(endpoint)
-        if response.status_code == 204:
+        resp = self.session.get(
+            f"https://www.myfitnesspal.com/food/diary?date={date_str}",
+            headers={"Accept": "text/html"}
+        )
+        resp.raise_for_status()
+        text = resp.text
+
+        events = []
+        for m in re.finditer(r'class="meal_header"[^>]*>.*?<td[^>]*>([^<]+)', text, re.DOTALL):
+            meal = m.group(1).strip()
+            if meal in ("Breakfast", "Lunch", "Dinner", "Snacks"):
+                events.append(("meal", m.start(), meal))
+
+        for m in re.finditer(r'data-food-entry-id="(\d+)"[^>]*>([^<]+)', text):
+            events.append(("entry", m.start(), (m.group(1), m.group(2).strip())))
+
+        events.sort(key=lambda x: x[1])
+
+        current_meal = None
+        entries = []
+        for evt_type, _, data in events:
+            if evt_type == "meal":
+                current_meal = data
+            else:
+                eid, name = data
+                entries.append({"id": eid, "name": name, "meal": current_meal})
+        return entries
+
+    def delete_diary_entry(self, entry_id: str) -> bool:
+        """
+        删除指定的日记条目。使用网页端 /food/remove/ 端点，需要 CSRF token。
+        """
+        self._ensure_token_valid()
+        # 获取 CSRF token
+        if not hasattr(self, '_csrf_token') or not self._csrf_token:
+            resp = self.session.get(
+                "https://www.myfitnesspal.com/food/diary",
+                headers={"Accept": "text/html"}
+            )
+            match = re.search(r'name="csrf-token"\s+content="([^"]+)"', resp.text)
+            self._csrf_token = match.group(1) if match else ""
+
+        endpoint = f"https://www.myfitnesspal.com/food/remove/{entry_id}"
+        headers = {
+            "X-CSRF-Token": self._csrf_token,
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "text/javascript, application/javascript, */*; q=0.01",
+        }
+        response = self.session.delete(endpoint, headers=headers)
+        if response.status_code in (200, 204):
             logger.info("成功删除日记条目: {}", entry_id)
             return True
         elif response.status_code == 404:
@@ -721,60 +822,33 @@ def record_nutrition(date: str, meal_type: str, items: List[Any]) -> str:
     Record food, nutrients, or supplements to MyFitnessPal.
     记录食物、营养素或补剂到 MyFitnessPal。
 
-    ## 🌍 CRITICAL — Multilingual Input Rules (MUST follow before every call)
+    ## Data Source Priority (automatic, no manual intervention needed)
+    The system resolves nutrition data in this order:
+      1. Local config (supplements_config.yaml) — user-calibrated, highest trust
+      2. USDA database (usda_core.db) — standard reference data
+      3. AI-provided values (from Dict input) — estimation fallback
+      4. Zero with warning — last resort
 
-    ### Rule A · Basic Ingredients → ENGLISH ONLY for USDA lookup
-    The local usda_core.db FTS5 engine ONLY understands English. Non-English
-    queries will yield ZERO results. ALWAYS translate before calling.
+    ## Input Format
 
-    Translation table (memorize these patterns):
-      苹果 / Manzana / りんご / Pomme       → "Apple"
-      鸡蛋 / Ei / Huevo / Œuf              → "Egg"
-      牛肉 / Rindfleisch / Carne de res    → "Beef"
-      鸡胸肉 / Pechuga / Poitrine poulet   → "Chicken Breast"
-      三文鱼 / Salmón / サーモン            → "Salmon"
-      糙米 / Arroz integral / Riz brun     → "Brown Rice"
-      全麦面包 / Pain complet / Vollkorn   → "Whole Wheat Bread"
-      牛油果 / Aguacate / Avocat           → "Avocado"
-      菠菜 / Espinaca / Épinard           → "Spinach"
+    ### Preferred: String with weight in grams + English food name
+    Translate food names to English and normalize weight to grams.
+    Examples:
+      "100g Fried Egg"       (1 egg ≈ 50g, 2 eggs = 100g)
+      "120g Banana"          (1 banana ≈ 120g)
+      "500g Mantis Shrimp steamed"
+      "200g Cooked Rice"
 
-    ### Rule B · Regional / Complex Dishes → AI estimation Dict (NOT a string)
-    For culture-specific dishes (宫保鸡丁, Paella, Rendang, Biryani, Pad Krapao
-    etc.) that are unlikely to be in USDA, SKIP the lookup and pass a full Dict:
-      {"name": "宫保鸡丁 (200g, AI估算)", "calories": 360,
-       "macros": {"protein": 28, "carbs": 18, "fat": 16, "sodium": 650}}
-    NEVER pass only the dish name as a string — it will log as 0 kcal.
-
-    ### Rule C · Unit Normalization (flatten before calling)
-    Convert all non-metric units to grams first, then compute serving_ratio:
-      1 oz  → 28.35 g    |  1 cup liquid → 240 g   |  1 cup flour → 125 g
-      1 tbsp → 15 g      |  1 tsp → 5 g             |  1 lb → 453.6 g
-    serving_ratio = actual_grams / 100
-
-    ### Rule D · Self-healing for unknown languages
-    If user input language is unrecognized, make your best semantic translation,
-    mark the name with "(AI估算，请确认)", pass as Dict, then ask the user
-    to confirm.
-
-    ## Quick Decision Tree
-      Input → In supplements_config? → YES: use config values directly
-                                     → NO: Simple ingredient?
-                                            YES → translate to EN → lookup_food_nutrition
-                                                  → USDA hit? YES → scale by grams
-                                                              NO  → AI estimate Dict
-                                            NO → Regional dish?
-                                                  YES → AI estimate Dict (skip USDA)
-                                                  NO  → self-healing bridge → Dict + confirm
+    ### Fallback: Dict for regional/complex dishes unlikely in USDA
+    Only use Dict when the dish is culture-specific (宫保鸡丁, Paella, etc.).
+    calories and macros are OPTIONAL — system will still try config/USDA first.
+      {"name": "宫保鸡丁 Kung Pao Chicken (200g)", "calories": 360,
+       "macros": {"protein": 28, "carbs": 18, "fat": 16}}
 
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         meal_type (str): breakfast, lunch, dinner, or snack. | 餐次类型。
-        items (List[Union[str, Dict]]): 
-            1. 简单食材：传字符串 (e.g. '100g Chicken Breast', '200g Brown Rice')，
-               系统自动走 本地库 → USDA 检索流水线。
-               ⚠️ 字符串中的食物名必须已经翻译为英文！
-            2. 地域菜肴/复合食品：传完整数值 Dict，包含 name/calories/macros，
-               名称中注明 AI估算，防止 0 kcal 幻觉录入。
+        items (List[Union[str, Dict]]): Food items as strings or dicts. | 食物列表。
     """
     try:
         mfp = get_adapter()
@@ -818,7 +892,7 @@ def get_daily_summary(date: str) -> str:
 
         for item in diary_data.get("items", []):
             itype = item.get("type")
-            if itype == "diary_meal":
+            if itype in ["diary_meal", "food_entry"]:
                 nc = item.get("nutritional_contents", {})
                 cal_eaten += nc.get("energy", {}).get("value", 0)
                 protein_eaten += nc.get("protein", 0)
@@ -1023,7 +1097,7 @@ def delete_last_entry(date: str, count: int = 1, meal_type: Optional[str] = None
     """
     Delete records. Supports deleting the most recent N entries or all entries for a specific meal type.
     删除记录。支持删除最近的 N 条，或删除指定餐次（如 breakfast/lunch/dinner/snack）的所有记录。
-    
+
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         count (int): Number of most recent items to delete. | 待删除的最近条目数。
@@ -1031,23 +1105,19 @@ def delete_last_entry(date: str, count: int = 1, meal_type: Optional[str] = None
     """
     try:
         mfp = get_adapter()
-        diary_data = mfp.get_diary_data(date)
-        items = diary_data.get("items", [])
-        
+        # v2 API 不返回单条 food_entry，必须从 HTML 页面解析
+        food_entries = mfp.get_food_entries_from_html(date)
+
         # 映射餐次名称
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         target_meal_name = meal_map.get(meal_type.lower()) if meal_type else None
-        
-        # 筛选出符合条件的食物条目 (diary_meal)
-        food_entries = [i for i in items if i.get("type") == "diary_meal"]
-        
+
         if target_meal_name:
-            # 进一步筛选出指定餐次的条目
-            food_entries = [i for i in food_entries if i.get("meal_name") == target_meal_name]
+            food_entries = [e for e in food_entries if e.get("meal") == target_meal_name]
             if not food_entries:
                 return f"{date} 的 {meal_type} 没有找到可以删除的饮食记录。"
-            # 如果指定了餐次，默认删除该餐次的所有记录 (通过设置一个较大的 count)
-            if count == 1: # 如果用户没指定具体删几条，默认删掉这顿饭全部
+            # 如果指定了餐次且未特别指定数量，默认删除该餐次的所有记录
+            if count == 1:
                 to_delete = food_entries
             else:
                 to_delete = food_entries[-count:]
@@ -1055,11 +1125,11 @@ def delete_last_entry(date: str, count: int = 1, meal_type: Optional[str] = None
             if not food_entries:
                 return f"{date} 没有找到可以删除的饮食记录。"
             to_delete = food_entries[-count:]
-        
+
         deleted_names = []
         for entry in to_delete:
             entry_id = entry.get("id")
-            name = entry.get("food", {}).get("description", "未知食物")
+            name = entry.get("name", "未知食物")
             if entry_id:
                 if mfp.delete_diary_entry(entry_id):
                     deleted_names.append(name)
@@ -1197,6 +1267,29 @@ def lookup_food_nutrition(query: str) -> str:
         return f"USDA 查询结果 (每 100g): {json.dumps(results, indent=2, ensure_ascii=False)}"
     except Exception as exc:
         return f"USDA 查询失败: {exc}"
+
+@mcp.tool()
+def get_current_time() -> str:
+    """
+    Get the current system date and time (UTC and Local).
+    获取当前系统日期和时间（UTC 和本地）。
+    """
+    try:
+        now = datetime.now()
+        utc_now = datetime.utcnow()
+        # 获取系统当前时区名称
+        tz_name = time.tzname[time.daylight] if hasattr(time, 'tzname') else "Unknown"
+        
+        res = {
+            "local": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "utc": utc_now.strftime("%Y-%m-%d %H:%M:%S"),
+            "timezone": tz_name,
+            "date": now.strftime("%Y-%m-%d"),
+            "day_of_week": now.strftime("%A")
+        }
+        return json.dumps(res, indent=2, ensure_ascii=False)
+    except Exception as e:
+        return f"获取时间失败: {e}"
 
 
 def main():
