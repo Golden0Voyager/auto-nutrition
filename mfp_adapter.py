@@ -286,6 +286,7 @@ class MFPAdapter:
     def __init__(self, username: Optional[str] = None):
         self.BASE_URL = "https://api.myfitnesspal.com/v2"
         self.JOURNAL_FILE = "nutrition_journal.json"
+        self._JOURNAL_MAX_ENTRIES = 200
         self.usda = USDALocalResolver()
         self.session = requests.Session()
         self.session.headers.update({
@@ -302,18 +303,21 @@ class MFPAdapter:
         self._fetch_access_token()
 
     def _load_config(self) -> Dict[str, Any]:
-        """按需加载并缓存配置文件内容。"""
-        if self._config is not None:
-            return self._config
-        
+        """按需加载配置，基于文件修改时间自动热更新。"""
         config_path = os.path.join(os.path.dirname(__file__), "supplements_config.yaml")
         if not os.path.exists(config_path):
             self._config = {}
             return self._config
-            
+
+        current_mtime = os.path.getmtime(config_path)
+        if self._config is not None and hasattr(self, '_config_mtime') and self._config_mtime == current_mtime:
+            return self._config  # 文件未修改，返回缓存
+
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 self._config = yaml.safe_load(f) or {}
+            self._config_mtime = current_mtime
+            logger.info("配置文件已热更新 (mtime: {})", current_mtime)
             return self._config
         except Exception as e:
             logger.error("配置文件解析失败: {}", e)
@@ -721,8 +725,8 @@ class MFPAdapter:
             }
             journal.append(entry)
             
-            # 保持近期日志 (可选：保留最近 1000 条)
-            if len(journal) > 1000: journal = journal[-1000:]
+            # 保持近期日志 (保留最近 200 条，约 10 天的完整记录)
+            if len(journal) > self._JOURNAL_MAX_ENTRIES: journal = journal[-self._JOURNAL_MAX_ENTRIES:]
             
             with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
                 json.dump(journal, tf, indent=2, ensure_ascii=False)
@@ -852,8 +856,37 @@ def record_nutrition(date: str, meal_type: str, items: List[Any]) -> str:
     """
     try:
         mfp = get_adapter()
+
+        # 🛡️ 服务端时间校验防护层
+        now = datetime.now()
+        today_str = now.strftime("%Y-%m-%d")
+        time_warnings = []
+        if date != today_str:
+            time_warnings.append(f"⚠️ 注意：当前日期为 {today_str}，但正在录入 {date} 的数据。")
+
+        hour = now.hour
+        expected_meals = {
+            range(5, 10): "breakfast",
+            range(10, 14): "lunch",
+            range(14, 17): "snack",
+            range(17, 21): "dinner",
+        }
+        expected = "snack"
+        for r, m in expected_meals.items():
+            if hour in r:
+                expected = m
+                break
+        if date == today_str and meal_type.lower() != expected:
+            time_warnings.append(
+                f"💡 提示：当前时间 {now.strftime('%H:%M')} 通常对应 {expected}，但录入了 {meal_type}。"
+            )
+
         result = mfp.record_nutrition(date, meal_type, items)
-        return f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
+
+        output = f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
+        if time_warnings:
+            output += "\n\n" + "\n".join(time_warnings)
+        return output
     except Exception as exc: return f"错误: {exc}"
 
 @mcp.tool()
@@ -1260,8 +1293,8 @@ def lookup_food_nutrition(query: str) -> str:
                      | 食物英文名称（严禁传入中文或其他非英文字符）。
     """
     try:
-        resolver = USDALocalResolver()
-        results = resolver.search(query, page_size=3)
+        mfp = get_adapter()
+        results = mfp.usda.search(query, page_size=3)
         if not results:
             return f"未找到 '{query}' 的 USDA 数据。请尝试更通用的英文名称。"
         return f"USDA 查询结果 (每 100g): {json.dumps(results, indent=2, ensure_ascii=False)}"
@@ -1271,21 +1304,35 @@ def lookup_food_nutrition(query: str) -> str:
 @mcp.tool()
 def get_current_time() -> str:
     """
-    Get the current system date and time (UTC and Local).
-    获取当前系统日期和时间（UTC 和本地）。
+    Get the current system date and time (UTC and Local),
+    with a suggested meal_type based on local time.
+    获取当前时间，并根据本地时间自动建议对应的 meal_type。
     """
     try:
         now = datetime.now()
         utc_now = datetime.utcnow()
-        # 获取系统当前时区名称
         tz_name = time.tzname[time.daylight] if hasattr(time, 'tzname') else "Unknown"
-        
+
+        # 服务端计算建议 meal_type，消除 AI 推断延迟
+        hour = now.hour
+        if 5 <= hour < 10:
+            suggested_meal = "breakfast"
+        elif 10 <= hour < 14:
+            suggested_meal = "lunch"
+        elif 14 <= hour < 17:
+            suggested_meal = "snack"
+        elif 17 <= hour < 21:
+            suggested_meal = "dinner"
+        else:
+            suggested_meal = "snack"  # 夜宵归入 snack
+
         res = {
             "local": now.strftime("%Y-%m-%d %H:%M:%S"),
             "utc": utc_now.strftime("%Y-%m-%d %H:%M:%S"),
             "timezone": tz_name,
             "date": now.strftime("%Y-%m-%d"),
-            "day_of_week": now.strftime("%A")
+            "day_of_week": now.strftime("%A"),
+            "suggested_meal_type": suggested_meal,
         }
         return json.dumps(res, indent=2, ensure_ascii=False)
     except Exception as e:
