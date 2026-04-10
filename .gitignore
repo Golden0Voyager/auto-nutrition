@@ -24,3 +24,4 @@ __pycache__/
 .gemini/
 .bkit/
 *.code-workspace
+GEMINI.md
