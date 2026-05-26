@@ -25,3 +25,6 @@ __pycache__/
 .bkit/
 *.code-workspace
 GEMINI.md
+# Skill-generated analysis artifacts
+.understand-anything/
+.codegraph/
