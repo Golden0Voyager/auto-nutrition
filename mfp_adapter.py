@@ -573,7 +573,7 @@ class MFPAdapter:
                     if all(ord(c) < 128 for c in alias):
                         # 纯英文使用单词边界正则匹配，防止 "Gel" 匹配 "Gelatin"
                         # 将下划线和空格视为等价，统一为 \s+ 或 [_\s]+ 进行匹配
-                        alias_pattern = re.escape(alias).replace(r'\_', r'[\s_]+').replace(r'\ ', r'[\s_]+')
+                        alias_pattern = re.escape(alias).replace('_', r'[\s_]+').replace(r'\ ', r'[\s_]+')
                         if re.search(r'\b' + alias_pattern + r'\b', name_lower):
                             matched_conf = conf
                             break
