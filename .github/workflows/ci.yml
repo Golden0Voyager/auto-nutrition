@@ -24,10 +24,10 @@ jobs:
         run: uv sync --extra test
 
       - name: Run ruff check
-        run: uv run ruff check mfp_adapter/ src/auto_nutrition/ tests/
+        run: uv run ruff check mfp_adapter.py tests/
 
       - name: Run mypy
-        run: uv run mypy mfp_adapter/ src/auto_nutrition/ || true
+        run: uv run mypy mfp_adapter.py || true
 
       - name: Run tests with coverage
         run: uv run pytest --cov --cov-report=term-missing tests/

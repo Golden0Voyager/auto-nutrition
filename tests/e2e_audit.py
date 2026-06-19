@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mfp_adapter import USDALocalResolver
 
+
 def main():
     # ===== 1. 检查本地日志最近记录 =====
     with open('/Users/hainingyu/Code/auto_nutrition/nutrition_journal.json') as f:

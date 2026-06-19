@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+
 from mfp_adapter import MFPAdapter, SessionExpiredError
 
 
@@ -35,7 +36,7 @@ def test_mfp_connection():
         print(f"\n[2/3] 录入测试数据: {today} / Snack / 1 kcal ...")
         result = adapter.record_nutrition(today, "snack", test_items)
 
-        print(f"\n[3/3] ✅ 录入成功!")
+        print("\n[3/3] ✅ 录入成功!")
         print(f"  返回详情: {json.dumps(result, indent=2, ensure_ascii=False)}")
 
         print("\n" + "=" * 50)

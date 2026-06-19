@@ -1,9 +1,6 @@
-import re
 from unittest.mock import MagicMock
 
 import pytest
-from mfp_adapter import MFPAdapter
-
 
 SAMPLE_HTML = """
 <html>

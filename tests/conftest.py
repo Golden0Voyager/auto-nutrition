@@ -1,15 +1,12 @@
 import json
-import os
 import sqlite3
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
 from mfp_adapter import MFPAdapter
-
 
 # ---------------------------------------------------------------------------
 # Paths

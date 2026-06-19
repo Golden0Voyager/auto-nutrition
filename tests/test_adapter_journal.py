@@ -1,8 +1,9 @@
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+
 from mfp_adapter import MFPAdapter
 
 
@@ -24,7 +25,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "calories": 95, "macros": {"protein": 0.5}}]
         adapter._log_to_local_journal("2026-01-01", "Lunch", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         assert len(journal) == 1
@@ -38,7 +39,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "calories": 95, "_config_matched": True, "_unmatched": False}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         item = journal[0]["items"][0]
@@ -49,7 +50,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "calories": 95, "fiber": None}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         item = journal[0]["items"][0]
@@ -59,7 +60,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "macros": {}}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         item = journal[0]["items"][0]
@@ -69,7 +70,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "macros": {"protein": 0.5, "fiber": None}}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         item = journal[0]["items"][0]
@@ -81,7 +82,7 @@ class TestLogToLocalJournal:
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
         adapter._log_to_local_journal("2026-01-01", "Lunch", [{"name": "Rice", "calories": 200}])
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         assert len(journal) == 2
@@ -92,7 +93,7 @@ class TestLogToLocalJournal:
         for i in range(4):
             adapter._log_to_local_journal(f"2026-01-0{i+1}", "Lunch", [{"name": f"Food {i}", "calories": 100}])
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         assert len(journal) == 2
@@ -103,7 +104,7 @@ class TestLogToLocalJournal:
         items = [{"name": "Apple", "calories": 95}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             data = json.load(f)
         assert isinstance(data, list)
 
@@ -111,7 +112,7 @@ class TestLogToLocalJournal:
         items = [{"name": "煎鸡蛋", "calories": 90}]
         adapter._log_to_local_journal("2026-01-01", "早餐", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
 
         assert journal[0]["items"][0]["name"] == "煎鸡蛋"

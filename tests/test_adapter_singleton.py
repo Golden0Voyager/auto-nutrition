@@ -1,6 +1,5 @@
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-import pytest
 import mfp_adapter
 
 
@@ -45,6 +44,7 @@ class TestMainEntryPoint:
 
     def test_main_as_main_guard(self):
         import runpy
+
         from mcp.server.fastmcp import FastMCP
         with patch.object(FastMCP, "run") as mock_run:
             runpy.run_path(mfp_adapter.__file__, run_name="__main__")

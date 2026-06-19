@@ -1,22 +1,22 @@
-import os
-import sys
 import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
 import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 import requests
 import yaml
-import re
-import tempfile
-import asyncio
-import random
-import sqlite3
-from datetime import datetime
-from typing import List, Dict, Optional, Any
-from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, Field, ValidationError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from pydantic import BaseModel, Field
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
+
 
 def is_server_error(exception: BaseException) -> bool:
     if isinstance(exception, requests.exceptions.HTTPError):
@@ -30,38 +30,38 @@ class NutritionModel(BaseModel):
     carbs: float = Field(default=0, ge=0, description="Carbohydrates (g) | 碳水化合物 (g)")
     fat: float = Field(default=0, ge=0, description="Total Fat (g) | 脂肪 (g)")
     # 微量元素 (Optional)
-    sodium: Optional[float] = Field(None, ge=0, description="Sodium (mg) | 钠 (mg)")
-    potassium: Optional[float] = Field(None, ge=0, description="Potassium (mg) | 钾 (mg)")
-    calcium: Optional[float] = Field(None, ge=0, description="Calcium (%DV) | 钙 (%DV)")
-    iron: Optional[float] = Field(None, ge=0, description="Iron (%DV) | 铁 (%DV)")
-    vitamin_a: Optional[float] = Field(None, ge=0, description="Vitamin A (%DV) | 维生素 A (%DV)")
-    vitamin_c: Optional[float] = Field(None, ge=0, description="Vitamin C (%DV) | 维生素 C (%DV)")
-    fiber: Optional[float] = Field(None, ge=0, description="Dietary Fiber (g) | 膳食纤维 (g)")
-    sugar: Optional[float] = Field(None, ge=0, description="Sugar (g) | 糖分 (g)")
-    vitamin_d: Optional[float] = Field(None, ge=0, description="Vitamin D (%DV) | 维生素 D (%DV)")
-    cholesterol: Optional[float] = Field(None, ge=0, description="Cholesterol (mg) | 胆固醇 (mg)")
-    saturated_fat: Optional[float] = Field(None, ge=0, description="Saturated Fat (g) | 饱和脂肪 (g)")
-    polyunsaturated_fat: Optional[float] = Field(None, ge=0, description="Polyunsaturated Fat (g) | 多不饱和脂肪 (g)")
-    monounsaturated_fat: Optional[float] = Field(None, ge=0, description="Monounsaturated Fat (g) | 单不饱和脂肪 (g)")
-    trans_fat: Optional[float] = Field(None, ge=0, description="Trans Fat (g) | 反式脂肪 (g)")
+    sodium: float | None = Field(None, ge=0, description="Sodium (mg) | 钠 (mg)")
+    potassium: float | None = Field(None, ge=0, description="Potassium (mg) | 钾 (mg)")
+    calcium: float | None = Field(None, ge=0, description="Calcium (%DV) | 钙 (%DV)")
+    iron: float | None = Field(None, ge=0, description="Iron (%DV) | 铁 (%DV)")
+    vitamin_a: float | None = Field(None, ge=0, description="Vitamin A (%DV) | 维生素 A (%DV)")
+    vitamin_c: float | None = Field(None, ge=0, description="Vitamin C (%DV) | 维生素 C (%DV)")
+    fiber: float | None = Field(None, ge=0, description="Dietary Fiber (g) | 膳食纤维 (g)")
+    sugar: float | None = Field(None, ge=0, description="Sugar (g) | 糖分 (g)")
+    vitamin_d: float | None = Field(None, ge=0, description="Vitamin D (%DV) | 维生素 D (%DV)")
+    cholesterol: float | None = Field(None, ge=0, description="Cholesterol (mg) | 胆固醇 (mg)")
+    saturated_fat: float | None = Field(None, ge=0, description="Saturated Fat (g) | 饱和脂肪 (g)")
+    polyunsaturated_fat: float | None = Field(None, ge=0, description="Polyunsaturated Fat (g) | 多不饱和脂肪 (g)")
+    monounsaturated_fat: float | None = Field(None, ge=0, description="Monounsaturated Fat (g) | 单不饱和脂肪 (g)")
+    trans_fat: float | None = Field(None, ge=0, description="Trans Fat (g) | 反式脂肪 (g)")
 
 class FoodItemModel(BaseModel):
     name: str = Field(..., description="Food name | 食物名称")
-    calories: Optional[float] = Field(None, ge=0, description="Calories (kcal), optional — system will auto-lookup if omitted | 热量 (kcal)，可选——不填则自动查库")
-    macros: Optional[NutritionModel] = Field(None, description="Macro and micronutrients, optional | 营养素指标，可选")
-    meal_type: Optional[str] = Field(None, description="Meal type (breakfast/lunch/dinner/snack) | 餐次类型")
-    date: Optional[str] = Field(None, description="Date (YYYY-MM-DD) | 日期")
-    serving_ratio: Optional[float] = Field(1.0, description="Serving size multiplier | 食用比例系数")
+    calories: float | None = Field(None, ge=0, description="Calories (kcal), optional — system will auto-lookup if omitted | 热量 (kcal)，可选——不填则自动查库")
+    macros: NutritionModel | None = Field(None, description="Macro and micronutrients, optional | 营养素指标，可选")
+    meal_type: str | None = Field(None, description="Meal type (breakfast/lunch/dinner/snack) | 餐次类型")
+    date: str | None = Field(None, description="Date (YYYY-MM-DD) | 日期")
+    serving_ratio: float | None = Field(1.0, description="Serving size multiplier | 食用比例系数")
 
 class ExerciseModel(BaseModel):
     name: str = Field(..., description="Exercise name (e.g., 'Running') | 运动名称（如：跑步）")
     exercise_type: str = Field(..., description="'cardio' or 'strength' | 'cardio'(有氧) 或 'strength'(力量)")
     date: str = Field(..., description="Date (YYYY-MM-DD) | 日期")
-    calories_burned: Optional[float] = Field(None, description="Estimated calories burned | 预估消耗热量")
-    duration_min: Optional[float] = Field(None, description="Duration in minutes | 运动时长（分钟）")
-    sets: Optional[int] = Field(None, description="Number of sets | 组数")
-    reps: Optional[int] = Field(None, description="Repetitions per set | 每组次数")
-    weight_kg: Optional[float] = Field(None, description="Weight per set (kg) | 每组重量（公斤）")
+    calories_burned: float | None = Field(None, description="Estimated calories burned | 预估消耗热量")
+    duration_min: float | None = Field(None, description="Duration in minutes | 运动时长（分钟）")
+    sets: int | None = Field(None, description="Number of sets | 组数")
+    reps: int | None = Field(None, description="Repetitions per set | 每组次数")
+    weight_kg: float | None = Field(None, description="Weight per set (kg) | 每组重量（公斤）")
 
 load_dotenv()
 
@@ -87,7 +87,7 @@ class USDALocalResolver:
 
     # USDA nutrient_id -> (our_field_name, original_unit)
     # These field names align with _create_custom_food's field_map
-    NUTRIENT_MAP: Dict[int, tuple] = {
+    NUTRIENT_MAP: dict[int, tuple] = {
         1008: ("energy", "kcal"),          # 传统通用值，覆盖广
         2047: ("energy_atwater", "kcal"),   # Atwater General Factors — 新版条目，精度中
         2048: ("energy_atwater_sp", "kcal"),# Atwater Specific Factors — 新版条目，精度最高
@@ -111,7 +111,7 @@ class USDALocalResolver:
     }
 
     # MFP expects %DV for these fields; convert from absolute values
-    DV_BASES: Dict[str, float] = {
+    DV_BASES: dict[str, float] = {
         "calcium": 1300.0,   # mg
         "iron": 18.0,        # mg
         "vitamin_a": 900.0,  # mcg RAE
@@ -127,7 +127,7 @@ class USDALocalResolver:
         "燕麦": "Oats", "香蕉": "Banana", "西红柿": "Tomato",
     }
 
-    def search(self, query: str, page_size: int = 3) -> List[Dict[str, Any]]:
+    def search(self, query: str, page_size: int = 3) -> list[dict[str, Any]]:
         """Full-text search with complete nutrient profiles.
 
         Returns per-100g data. The caller should multiply by serving_ratio.
@@ -204,7 +204,7 @@ class USDALocalResolver:
             logger.error("USDA search failed: {}", e)
             return []
 
-    def _food_relevance_score(self, description: str, query_words: List[str]) -> float:
+    def _food_relevance_score(self, description: str, query_words: list[str]) -> float:
         """自定义食物描述质量评分，优先基础食材，惩罚噪声条目。"""
         desc_lower = description.lower()
         score = 0.0
@@ -250,7 +250,7 @@ class USDALocalResolver:
         score -= len(description) * 0.1
         return score
 
-    def _search_normalized(self, cursor, query: str, page_size: int, query_words: List[str]) -> List[Dict[str, Any]]:
+    def _search_normalized(self, cursor, query: str, page_size: int, query_words: list[str]) -> list[dict[str, Any]]:
         """Query the normalized schema with full nutrient profiles."""
         # 先按是否有能量数据排序（有能量的优先），再按 bm25 排序。
         # 避免大量无能量数据的 brand/sample 条目占据前排，导致基础食材被 LIMIT 截断。
@@ -291,7 +291,7 @@ class USDALocalResolver:
             )
 
             calories = 0.0
-            macros: Dict[str, float] = {}
+            macros: dict[str, float] = {}
 
             for nrow in cursor.fetchall():
                 nid = nrow["nutrient_id"]
@@ -321,7 +321,7 @@ class USDALocalResolver:
         valid_results.sort(key=lambda r: self._food_relevance_score(r["name"], query_words), reverse=True)
         return valid_results[:page_size]
 
-    def _search_legacy(self, cursor, query: str, page_size: int, query_words: List[str]) -> List[Dict[str, Any]]:
+    def _search_legacy(self, cursor, query: str, page_size: int, query_words: list[str]) -> list[dict[str, Any]]:
         """Backward-compatible query for the old flat schema."""
         cursor.execute(
             """
@@ -373,7 +373,7 @@ class MFPAdapter:
     COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
     JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutrition_journal.json")
 
-    def __init__(self, username: Optional[str] = None):
+    def __init__(self, username: str | None = None):
         self.BASE_URL = "https://api.myfitnesspal.com/v2"
         # 使用类属性定义的绝对路径，确保日志始终写入项目目录
         self.JOURNAL_FILE = self.__class__.JOURNAL_FILE
@@ -393,7 +393,7 @@ class MFPAdapter:
         self._load_cookies()
         self._fetch_access_token()
 
-    def _load_config(self) -> Dict[str, Any]:
+    def _load_config(self) -> dict[str, Any]:
         """按需加载配置，基于文件修改时间自动热更新。"""
         config_path = os.path.join(os.path.dirname(__file__), "supplements_config.yaml")
         if not os.path.exists(config_path):
@@ -405,7 +405,7 @@ class MFPAdapter:
             return self._config  # 文件未修改，返回缓存
 
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 self._config = yaml.safe_load(f) or {}
             self._config_mtime = current_mtime
             logger.info("配置文件已热更新 (mtime: {})", current_mtime)
@@ -420,7 +420,7 @@ class MFPAdapter:
             logger.warning(f"未找到 {self.COOKIES_FILE}，请先执行 `refresh_login` 工具重置登录凭据。")
             return
         try:
-            with open(self.COOKIES_FILE, "r") as f:
+            with open(self.COOKIES_FILE) as f:
                 cookie_data = json.load(f)
             jar = requests.cookies.RequestsCookieJar()
             for cookie in cookie_data:
@@ -466,11 +466,11 @@ class MFPAdapter:
             raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `refresh_login` 工具重置登录凭据。")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def _create_custom_food(self, item: Dict[str, Any]) -> Dict[str, str]:
+    def _create_custom_food(self, item: dict[str, Any]) -> dict[str, str]:
         nutritional_contents = {
             "energy": {"unit": "calories", "value": item.get("calories", 0)},
         }
-        
+
         # 内部映射，将模型字段还原为 MFP 字段
         field_map = {
             "protein": "protein",
@@ -491,7 +491,7 @@ class MFPAdapter:
             "monounsaturated_fat": "monounsaturated_fat",
             "trans_fat": "trans_fat"
         }
-        
+
         macros_data = item.get("macros", {})
         for model_field, mfp_field in field_map.items():
             if model_field in macros_data and macros_data[model_field] is not None:
@@ -515,7 +515,7 @@ class MFPAdapter:
         return {"id": food_info["id"], "version": food_info["version"]}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def get_diary_data(self, date_str: str) -> Dict[str, Any]:
+    def get_diary_data(self, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/diary?entry_date={date_str}"
         response = self.session.get(endpoint)
@@ -523,7 +523,7 @@ class MFPAdapter:
         return response.json()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def record_weight(self, weight_kg: float, date_str: str) -> Dict[str, Any]:
+    def record_weight(self, weight_kg: float, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/measurements"
         payload = {"items": [{"type": "measurement", "date": date_str, "value": float(weight_kg), "unit": "kg", "measurement_type": "weight"}]}
@@ -532,7 +532,7 @@ class MFPAdapter:
         return {"status": "ok", "weight_kg": weight_kg, "date": date_str}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def record_water(self, ml: int, date_str: str) -> Dict[str, Any]:
+    def record_water(self, ml: int, date_str: str) -> dict[str, Any]:
         """
         录入饮水量。
         """
@@ -552,15 +552,15 @@ class MFPAdapter:
         response.raise_for_status()
         return {"status": "ok", "ml": ml, "date": date_str}
 
-    def _apply_config_safeguard(self, item: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_config_safeguard(self, item: dict[str, Any]) -> dict[str, Any]:
         conf_data = self._load_config()
         if not conf_data:
             return item
-            
+
         # 合并不同类别的配置数据进行匹配
         matched_conf = None
         name_lower = item["name"].lower()
-        
+
         # 遍历所有可能的单项配置节点进行“模糊+全量”匹配
         for section in ("supplements", "regional_foods", "common_foods"):
             section_data = conf_data.get(section, {})
@@ -568,7 +568,7 @@ class MFPAdapter:
                 # 别名列表包含：Key 本身, 配置中的 Name, 以及显式定义的 Aliases
                 aliases = {key.lower(), conf.get("name", "").lower()} | {a.lower() for a in conf.get("aliases", [])}
                 aliases.discard("") # 移除空字符串
-                
+
                 for alias in aliases:
                     if all(ord(c) < 128 for c in alias):
                         # 纯英文使用单词边界正则匹配，防止 "Gel" 匹配 "Gelatin"
@@ -586,29 +586,29 @@ class MFPAdapter:
                     break
             if matched_conf:
                 break
-        
+
         if matched_conf:
             ratio = float(item.get("serving_ratio", 1.0))
             safe_item = item.copy()
             # 如果配置中有正式名称，则使用配置名称，否则保持用户输入
             official_name = matched_conf.get("name", item["name"])
-            
+
             # 核心优化：如果匹配到配置，则强制执行数值校准，防止大模型幻觉
             safe_item["name"] = f"{official_name}"
             safe_item["calories"] = round(matched_conf.get("calories", 0) * ratio, 1)
-            
+
             # 合并宏量和微量元素
             combined_nutrients = matched_conf.get("macros", {}).copy()
             if "micros" in matched_conf:
                 combined_nutrients.update(matched_conf["micros"])
-            
+
             safe_item["macros"] = {
                 k: round(v * ratio, 1) for k, v in combined_nutrients.items()
             }
             logger.info("应用配置保护: {} -> {}", item["name"], safe_item["name"])
             safe_item["_config_matched"] = True
             return safe_item
-            
+
         return item
 
     def _parse_quantity(self, text: str) -> tuple[float, str, str]:
@@ -626,7 +626,7 @@ class MFPAdapter:
             qty_f = float(qty_str)
             unit = ''
             name = rest.strip()
-            
+
             KNOWN_UNITS = {'g', 'ml', 'oz', 'lb', 'kg', '个', '根', '片', '块', '份', '勺', '杯', 'cup', 'tsp', 'tbsp', 'serving', 'servings'}
             for u in sorted(KNOWN_UNITS, key=len, reverse=True):
                 if rest.lower().startswith(u.lower()):
@@ -637,11 +637,9 @@ class MFPAdapter:
                         break
 
             unit_lower = unit.lower()
-            
+
             # 重量/容量单位 → 统一换算为"每100g"的 ratio
-            if unit_lower == 'g':
-                ratio = qty_f / 100.0
-            elif unit_lower == 'ml':
+            if unit_lower == 'g' or unit_lower == 'ml':
                 ratio = qty_f / 100.0
             elif unit_lower == 'oz':
                 ratio = (qty_f * 28.35) / 100.0
@@ -651,17 +649,17 @@ class MFPAdapter:
                 ratio = (qty_f * 1000) / 100.0
             else:
                 ratio = qty_f
-            
+
             return ratio, f"{qty_str}{unit}", name
         return 1.0, "1 serving", text
 
 
 
-    def record_nutrition(self, date_str: str, meal_type: str, items: List[Any]) -> Dict[str, Any]:
+    def record_nutrition(self, date_str: str, meal_type: str, items: list[Any]) -> dict[str, Any]:
         self._ensure_token_valid()
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         meal_name = meal_map.get(meal_type.lower(), "Snacks")
-        
+
         # 预处理：将所有输入转为 Dict，并提取份量
         # AI 预填的 calories/macros 暂存到 ai_ 前缀字段，清空主字段让管线完整执行
         processed_items = []
@@ -803,17 +801,17 @@ class MFPAdapter:
             except Exception as e:
                 logger.error('录入 "{name}" 失败: {error}', name=item["name"], error=e)
                 results.append({"name": item["name"], "calories": item["calories"], "unmatched": item.get("_unmatched", False), "status": "error", "error": str(e)})
-        
+
         # --- 本地高保真日志记录 ---
         self._log_to_local_journal(date_str, meal_name, processed_items)
-        
+
         unmatched = [r["name"] for r in results if r.get("unmatched")]
         result = {"status": "ok", "count": len(results)}
         if unmatched:
             result["warnings"] = [f'⚠️ 以下食物未匹配到营养数据，以 0 kcal 录入: {", ".join(unmatched)}']
         return result
 
-    def _log_to_local_journal(self, date_str: str, meal_name: str, items: List[Dict[str, Any]]) -> None:
+    def _log_to_local_journal(self, date_str: str, meal_name: str, items: list[dict[str, Any]]) -> None:
         """
         在本地保存完整的营养数据副本，包括 MFP 不支持的微量元素。
         采用原子写入（tempfile + os.replace）机制防崩溃。
@@ -822,11 +820,11 @@ class MFPAdapter:
         try:
             journal = []
             if os.path.exists(self.JOURNAL_FILE):
-                with open(self.JOURNAL_FILE, "r", encoding="utf-8") as f:
+                with open(self.JOURNAL_FILE, encoding="utf-8") as f:
                     journal = json.load(f)
-            
+
             # 清理 items：去掉内部字段和 None 值
-            def _clean_item(item: Dict[str, Any]) -> Dict[str, Any]:
+            def _clean_item(item: dict[str, Any]) -> dict[str, Any]:
                 cleaned = {}
                 for k, v in item.items():
                     if k.startswith("_"):
@@ -839,7 +837,7 @@ class MFPAdapter:
                             continue
                     cleaned[k] = v
                 return cleaned
-            
+
             # 日志条目结构
             entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -848,14 +846,14 @@ class MFPAdapter:
                 "items": [_clean_item(it) for it in items]
             }
             journal.append(entry)
-            
+
             # 保持近期日志 (保留最近 200 条，约 10 天的完整记录)
             if len(journal) > self._JOURNAL_MAX_ENTRIES: journal = journal[-self._JOURNAL_MAX_ENTRIES:]
-            
+
             with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
                 json.dump(journal, tf, indent=2, ensure_ascii=False)
                 temp_name = tf.name
-                
+
             os.replace(temp_name, self.JOURNAL_FILE)
             logger.info("本地高保真日志已原子录入 ({}, {} items)", len(items), len(json.dumps(entry, ensure_ascii=False)))
         except Exception as e:
@@ -931,7 +929,7 @@ class MFPAdapter:
             return True
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def get_nutrition_goals(self, date_str: str) -> Dict[str, Any]:
+    def get_nutrition_goals(self, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/nutrition_goals?date={date_str}"
         response = self.session.get(endpoint)
@@ -940,7 +938,7 @@ class MFPAdapter:
         return data.get("items", [{}])[0]
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def _post_diary_entry(self, diary_entry: Dict[str, Any]) -> None:
+    def _post_diary_entry(self, diary_entry: dict[str, Any]) -> None:
         """带重试的日记条目写入，供 record_nutrition 和 record_exercise 共用。"""
         response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
         response.raise_for_status()
@@ -954,7 +952,7 @@ def get_adapter():
     return adapter
 
 @mcp.tool()
-def record_nutrition(date: str, meal_type: str, items: List[Any]) -> str:
+def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
     """
     Record food, nutrients, or supplements to MyFitnessPal.
     记录食物、营养素或补剂到 MyFitnessPal。
@@ -1034,7 +1032,7 @@ def get_daily_summary(date: str) -> str:
     try:
         mfp = get_adapter()
         diary_data = mfp.get_diary_data(date)
-        
+
         # 尝试获取真实目标，获取失败则使用默认值
         try:
             goals = mfp.get_nutrition_goals(date)
@@ -1068,8 +1066,8 @@ def get_daily_summary(date: str) -> str:
                 cal_burned += item.get("energy", {}).get("value", 0)
 
         cal_remaining = cal_goal - cal_eaten + cal_burned
-        
-        
+
+
         # 用户体征数据 (原 get_user_metadata 功能)
         user_section = ""
         try:
@@ -1128,20 +1126,20 @@ def import_cookies(json_data: str) -> str:
         data = json.loads(json_data.strip())
         if not isinstance(data, list):
             return "格式错误：请确保您粘贴的是从 Cookie-Editor 导出的 JSON 数组格式内容。"
-        
+
         # 验证核心令牌是否存在
         has_token = any(c.get('name') in ['__Secure-next-auth.session-token', 'mfp-session'] for c in data)
         if not has_token:
             logger.warning("录入的 Cookie 可能缺少核心 Session 令牌，建议重新登录后导出。")
-            
+
         cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
         with open(cookies_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-            
+
         # 强制重置单例
         global adapter
         adapter = None
-        
+
         return "🎉 手动录入成功！服务已重载并完全恢复。您可以继续进行营养录入或查询了。"
     except Exception as e:
         logger.error("手动导入 Cookie 失败: {}", e)
@@ -1162,7 +1160,7 @@ def get_nutrition_trends(days: int = 7) -> str:
         from datetime import datetime, timedelta
         end_date = datetime.now()
         trends = []
-        
+
         # 完整的微量营养素字段集合（排除核心宏量）
         ALL_MICRO_FIELDS = {
             "sodium", "potassium", "calcium", "iron",
@@ -1176,7 +1174,7 @@ def get_nutrition_trends(days: int = 7) -> str:
         all_logs = []
         if os.path.exists(mfp.JOURNAL_FILE):
             try:
-                with open(mfp.JOURNAL_FILE, "r", encoding="utf-8") as f:
+                with open(mfp.JOURNAL_FILE, encoding="utf-8") as f:
                     all_logs = json.load(f)
             except Exception as e:
                 logger.warning("预加载本地日志失败: {}", e)
@@ -1230,23 +1228,23 @@ def get_nutrition_trends(days: int = 7) -> str:
                                 day_stats[k] = day_stats.get(k, 0.0) + float(v)
 
             trends.append(day_stats)
-            
+
         # 3. 视觉优化：转换为 Markdown 表格
         if not trends:
             return "没有找到趋势数据。"
-            
+
         # 整理表头：获取所有出现的 Key 并排序 (日期在前，宏量其次，微量在后)
         all_keys = set()
         for t in trends: all_keys.update(t.keys())
-        
+
         core_cols = ["date", "calories", "protein", "carbs", "fat"]
         micro_cols = sorted([k for k in all_keys if k not in core_cols])
         headers = core_cols + micro_cols
-        
+
         # 如果列数过多，只展示核心及有值的数据
         table = "| " + " | ".join(headers) + " |\n"
         table += "| " + " | ".join(["---"] * len(headers)) + " |\n"
-        
+
         for t in reversed(trends): # 按时间正序
             row = []
             for h in headers:
@@ -1254,7 +1252,7 @@ def get_nutrition_trends(days: int = 7) -> str:
                 if isinstance(val, float): val = round(val, 1)
                 row.append(str(val))
             table += "| " + " | ".join(row) + " |\n"
-            
+
         return f"### 📊 过去 {days} 天趋势分析 (高保真数据)\n\n{table}\n\n> 注：宏量元素来自 MFP，微量元素结合了本地高保真日志。"
     except Exception as exc:
         logger.error("趋势分析失败: {}", exc)
@@ -1283,7 +1281,7 @@ def get_food_config() -> str:
         return f"获取配置失败: {exc}"
 
 @mcp.tool()
-def delete_last_entry(date: str, count: int = 1, meal_type: Optional[str] = None) -> str:
+def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None) -> str:
     """
     Delete records. Supports deleting the most recent N entries or all entries for a specific meal type.
     删除记录。支持删除最近的 N 条，或删除指定餐次（如 breakfast/lunch/dinner/snack）的所有记录。
@@ -1323,10 +1321,10 @@ def delete_last_entry(date: str, count: int = 1, meal_type: Optional[str] = None
             if entry_id:
                 if mfp.delete_diary_entry(entry_id):
                     deleted_names.append(name)
-        
+
         if not deleted_names:
             return "未能成功删除任何条目。"
-        
+
         meal_msg = f" ({meal_type})" if meal_type else ""
         return f"已成功删除以下{meal_msg}记录: {', '.join(deleted_names)}"
     except Exception as exc:
@@ -1344,14 +1342,14 @@ def record_exercise(exercise: ExerciseModel) -> str:
     try:
         mfp = get_adapter()
         mfp._ensure_token_valid()
-        
+
         diary_entry = {
             "type": "exercise_entry",
             "date": exercise.date,
             "exercise_name": exercise.name,
             "client_id": "mfp-main-js"
         }
-        
+
         if exercise.exercise_type.lower() == "cardio":
             diary_entry["exercise_type"] = "cardiovascular"
             if exercise.calories_burned:
@@ -1364,10 +1362,10 @@ def record_exercise(exercise: ExerciseModel) -> str:
             if exercise.reps: diary_entry["repetitions"] = exercise.reps
             if exercise.weight_kg:
                 diary_entry["weight_per_set"] = {"value": exercise.weight_kg, "unit": "kilograms"}
-        
+
         endpoint = f"{mfp.BASE_URL}/diary"
         mfp._post_diary_entry(diary_entry)
-        
+
         type_cn = "有氧" if exercise.exercise_type.lower() == "cardio" else "力量"
         return f"成功记录{type_cn}运动: {exercise.name} ({exercise.date})。"
     except Exception as exc:

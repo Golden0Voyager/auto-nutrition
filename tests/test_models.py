@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
-from mfp_adapter import NutritionModel, FoodItemModel, ExerciseModel
+
+from mfp_adapter import ExerciseModel, FoodItemModel, NutritionModel
 
 
 class TestNutritionModel:

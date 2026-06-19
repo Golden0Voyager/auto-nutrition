@@ -1,4 +1,5 @@
 import pytest
+
 from mfp_adapter import MFPAdapter
 
 

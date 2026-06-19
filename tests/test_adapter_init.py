@@ -1,9 +1,9 @@
 import json
 import os
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+
 from mfp_adapter import MFPAdapter, SessionExpiredError
 
 
@@ -189,20 +189,18 @@ class TestLoadConfig:
         adapter._config = None
         adapter._config_mtime = 0
 
-        with patch("os.path.dirname", return_value=fake_dir):
-            with patch("os.path.exists", return_value=False):
-                config = adapter._load_config()
-                assert config == {}
+        with patch("os.path.dirname", return_value=fake_dir), patch("os.path.exists", return_value=False):
+            config = adapter._load_config()
+            assert config == {}
 
     def test_load_config_cached(self, adapter_without_network):
         adapter = adapter_without_network
         adapter._config = {"cached": True}
         adapter._config_mtime = 12345
 
-        with patch("os.path.getmtime", return_value=12345):
-            with patch("os.path.exists", return_value=True):
-                config = adapter._load_config()
-                assert config == {"cached": True}
+        with patch("os.path.getmtime", return_value=12345), patch("os.path.exists", return_value=True):
+            config = adapter._load_config()
+            assert config == {"cached": True}
 
     def test_load_config_hot_reload(self, adapter_without_network, tmp_path):
         import yaml

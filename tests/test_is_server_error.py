@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import requests
+
 from mfp_adapter import is_server_error
 
 

@@ -1,6 +1,8 @@
 import json
 from datetime import datetime
+
 from mfp_adapter import get_adapter
+
 
 def main():
     adapter = get_adapter()
@@ -15,7 +17,7 @@ def main():
         }
     ]
 
-    print(f"正在录入 半瓶宝矿力 测算数据...")
+    print("正在录入 半瓶宝矿力 测算数据...")
     result = adapter.record_nutrition(today, "snack", items)
     print("\n录入完成，返回结果：")
     print(json.dumps(result, indent=2, ensure_ascii=False))

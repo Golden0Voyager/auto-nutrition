@@ -1,8 +1,9 @@
 import json
 import os
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+
 from mfp_adapter import MFPAdapter
 from tests.conftest import mock_create_food, mock_post_diary
 
@@ -225,7 +226,7 @@ class TestRecordNutrition:
         items = [{"name": "Apple", "calories": 95}]
         adapter.record_nutrition("2026-01-01", "snack", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
         assert len(journal) == 1
         assert journal[0]["date"] == "2026-01-01"
@@ -241,7 +242,7 @@ class TestRecordNutrition:
             items = [{"name": f"Food {i}", "calories": 100}]
             adapter.record_nutrition("2026-01-01", "lunch", items)
 
-        with open(adapter.JOURNAL_FILE, "r", encoding="utf-8") as f:
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
             journal = json.load(f)
         assert len(journal) == 3
 

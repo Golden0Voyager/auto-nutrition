@@ -1,7 +1,7 @@
-import pytest
-from unittest.mock import patch
-from mfp_adapter import MFPAdapter
 
+import pytest
+
+from mfp_adapter import MFPAdapter
 
 _TEST_CONFIG = {
     "supplements": {
