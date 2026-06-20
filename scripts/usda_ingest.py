@@ -10,15 +10,15 @@ Schema:
   foods_fts(description, fdc_id)                ← FTS5 full-text index
 """
 
-import sqlite3
-import zipfile
 import csv
 import io
+import sqlite3
 import sys
+import zipfile
+from pathlib import Path
 
 import requests
 from loguru import logger
-from pathlib import Path
 
 # USDA FoodData Central CSV download URLs
 USDA_URLS = {
