@@ -1,5 +1,6 @@
 from mfp_adapter import MFPAdapter
 
+
 def scan_range(start_date_obj, days=3):
     import datetime
     adapter = MFPAdapter()

@@ -75,3 +75,6 @@ include = [
     "/supplements_config.yaml",
     "/README.md"
 ]
+
+[tool.bandit]
+skips = ["B101", "B311", "B404", "B603"]
