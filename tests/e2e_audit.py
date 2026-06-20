@@ -52,7 +52,7 @@ def main():
 
     all_foods = set()
     for d in sorted(by_date_meal.keys())[-7:]:
-        for m, foods in by_date_meal[d].items():
+        for _m, foods in by_date_meal[d].items():
             for name in foods:
                 clean = name.split('(')[0].split('/')[0].strip()
                 if clean and len(clean) > 2:
@@ -73,7 +73,7 @@ def main():
     print("\n\n=== 日志清理验证 ===")
     sample = data[-1]['items'][0] if data else {}
     null_count = sum(1 for v in sample.get('macros', {}).values() if v is None)
-    internal_fields = [k for k in sample.keys() if k.startswith('_')]
+    internal_fields = [k for k in sample if k.startswith('_')]
     print(f"最新条目: {sample.get('name', 'N/A')}")
     print(f"  macros 中 null 值: {null_count}")
     print(f"  内部字段: {internal_fields}")

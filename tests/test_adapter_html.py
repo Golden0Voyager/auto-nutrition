@@ -179,7 +179,7 @@ class TestDeleteDiaryEntry:
         adapter.session.get.return_value = resp_html
         adapter.session.delete.return_value = resp_del
 
-        with pytest.raises(Exception):
+        with pytest.raises(requests.exceptions.HTTPError):
             adapter.delete_diary_entry("12345")
 
     def test_delete_status_200(self, adapter):

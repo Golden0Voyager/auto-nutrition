@@ -506,7 +506,7 @@ class MFPAdapter:
                 "nutritional_contents": nutritional_contents,
             }
         }
-        micro_count = len([k for k in nutritional_contents.keys() if k != "energy"])
+        micro_count = len([k for k in nutritional_contents if k != "energy"])
         logger.info("MFP Food Payload ({} micros): {}", micro_count, json.dumps(food_payload, indent=2, ensure_ascii=False))
         response = self.session.post(f"{self.BASE_URL}/foods", json=food_payload)
         response.raise_for_status()
@@ -613,7 +613,7 @@ class MFPAdapter:
 
     def _parse_quantity(self, text: str) -> tuple[float, str, str]:
         """Parse quantity, unit, and food name from a string.
-        
+
         Examples:
             '100g Chicken Breast' -> (1.0, '100g', 'Chicken Breast')
             '300ml Whole Milk'    -> (3.0, '300ml', 'Whole Milk')
@@ -698,7 +698,7 @@ class MFPAdapter:
                     processed_items.append(d)
                 except Exception as e:
                     logger.error("AI 提供的字典未能通过 Pydantic 校验: {}", e)
-                    raise ValueError(f"提供的食物字典校验失败，请检查必填项(name): {e}")
+                    raise ValueError(f"提供的食物字典校验失败，请检查必填项(name): {e}") from e
             else: # Pydantic Model
                 processed_items.append(raw.model_dump() if hasattr(raw, 'model_dump') else raw)
 
@@ -848,7 +848,8 @@ class MFPAdapter:
             journal.append(entry)
 
             # 保持近期日志 (保留最近 200 条，约 10 天的完整记录)
-            if len(journal) > self._JOURNAL_MAX_ENTRIES: journal = journal[-self._JOURNAL_MAX_ENTRIES:]
+            if len(journal) > self._JOURNAL_MAX_ENTRIES:
+                journal = journal[-self._JOURNAL_MAX_ENTRIES:]
 
             with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
                 json.dump(journal, tf, indent=2, ensure_ascii=False)
@@ -948,7 +949,8 @@ adapter = None
 
 def get_adapter():
     global adapter
-    if adapter is None: adapter = MFPAdapter()
+    if adapter is None:
+        adapter = MFPAdapter()
     return adapter
 
 @mcp.tool()
@@ -1018,14 +1020,15 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
         if time_warnings:
             output += "\n\n" + "\n".join(time_warnings)
         return output
-    except Exception as exc: return f"错误: {exc}"
+    except Exception as exc:
+        return f"错误: {exc}"
 
 @mcp.tool()
 def get_daily_summary(date: str) -> str:
     """
     Get a daily nutrition budget summary (calories, protein, carbs, fat) for a specific date.
     获取指定日期的每日营养预算总结（卡路里、蛋白质、碳水、脂肪）。
-    
+
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
     """
@@ -1090,7 +1093,8 @@ def get_daily_summary(date: str) -> str:
             f"{user_section}"
         )
         return output
-    except Exception as exc: return f"获取总结失败: {exc}"
+    except Exception as exc:
+        return f"获取总结失败: {exc}"
 
 
 
@@ -1118,7 +1122,7 @@ def import_cookies(json_data: str) -> str:
     """
     Manually import MyFitnessPal cookies from a JSON string (exported from browser extensions).
     手动导入浏览器导出的 MFP Cookie JSON 字符串，以绕过登录阻断。
-    
+
     Args:
         json_data (str): The exported JSON cookies string. | 浏览器插件导出的 JSON 字符串。
     """
@@ -1150,7 +1154,7 @@ def get_nutrition_trends(days: int = 7) -> str:
     """
     Get nutrition trends for the last N days with high-fidelity micronutrients.
     获取最近 N 天的营养趋势分析，结合 MFP 宏量与本地高保真微量元素。
-    
+
     Args:
         days (int): Number of days to analyze (default 7, max 30). | 需分析的天数（默认7天，上限30天）。
     """
@@ -1235,7 +1239,8 @@ def get_nutrition_trends(days: int = 7) -> str:
 
         # 整理表头：获取所有出现的 Key 并排序 (日期在前，宏量其次，微量在后)
         all_keys = set()
-        for t in trends: all_keys.update(t.keys())
+        for t in trends:
+            all_keys.update(t.keys())
 
         core_cols = ["date", "calories", "protein", "carbs", "fat"]
         micro_cols = sorted([k for k in all_keys if k not in core_cols])
@@ -1249,7 +1254,8 @@ def get_nutrition_trends(days: int = 7) -> str:
             row = []
             for h in headers:
                 val = t.get(h, 0.0)
-                if isinstance(val, float): val = round(val, 1)
+                if isinstance(val, float):
+                    val = round(val, 1)
                 row.append(str(val))
             table += "| " + " | ".join(row) + " |\n"
 
@@ -1263,7 +1269,7 @@ def get_food_config() -> str:
     """
     Get the list of common foods and supplements from the local configuration.
     获取本地配置中的常用食物和补剂列表，用于提供点餐建议。
-    
+
     Args:
         None | 无
     """
@@ -1335,7 +1341,7 @@ def record_exercise(exercise: ExerciseModel) -> str:
     """
     Record cardiovascular or strength exercises to MyFitnessPal.
     记录有氧运动或力量训练到 MyFitnessPal。
-    
+
     Args:
         exercise (ExerciseModel): Exercise data model. | 运动数据模型。
     """
@@ -1358,12 +1364,13 @@ def record_exercise(exercise: ExerciseModel) -> str:
                 diary_entry["duration"] = int(exercise.duration_min * 60) # 秒
         else:
             diary_entry["exercise_type"] = "strength"
-            if exercise.sets: diary_entry["sets"] = exercise.sets
-            if exercise.reps: diary_entry["repetitions"] = exercise.reps
+            if exercise.sets:
+                diary_entry["sets"] = exercise.sets
+            if exercise.reps:
+                diary_entry["repetitions"] = exercise.reps
             if exercise.weight_kg:
                 diary_entry["weight_per_set"] = {"value": exercise.weight_kg, "unit": "kilograms"}
 
-        endpoint = f"{mfp.BASE_URL}/diary"
         mfp._post_diary_entry(diary_entry)
 
         type_cn = "有氧" if exercise.exercise_type.lower() == "cardio" else "力量"
@@ -1376,7 +1383,7 @@ def record_measurement(measurement_type: str, value: float, date: str) -> str:
     """
     Record body weight (kg) or water intake (ml).
     记录体重（公斤）或饮水量（毫升）。
-    
+
     Args:
         measurement_type (str): 'weight' or 'water'. | 'weight'(体重) 或 'water'(饮水)。
         value (float): Weight in kg or water in ml. | 体重(kg)或饮水量(ml)。
