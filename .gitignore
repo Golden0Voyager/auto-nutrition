@@ -31,3 +31,10 @@ GEMINI.md
 # Skill-generated analysis artifacts
 .understand-anything/
 .codegraph/
+
+# Toolchain caches
+.ruff_cache/
+.mypy_cache/
+
+# Coverage
+htmlcov/
