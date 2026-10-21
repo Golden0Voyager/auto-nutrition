@@ -92,11 +92,15 @@ class TestGetCookieGuide:
 
 
 class TestImportCookies:
-    def test_success(self):
+    def test_success(self, tmp_path, monkeypatch):
+        from mfp_adapter import MFPAdapter, import_cookies
+
+        target = tmp_path / "cookies.json"
+        monkeypatch.setattr(MFPAdapter, "COOKIES_FILE", str(target))
         cookies = json.dumps([{"name": "mfp-session", "value": "abc", "domain": ".myfitnesspal.com"}])
-        from mfp_adapter import import_cookies
         result = import_cookies(cookies)
         assert "成功" in result
+        assert json.loads(target.read_text(encoding="utf-8"))[0]["name"] == "mfp-session"
 
     def test_invalid_json(self):
         from mfp_adapter import import_cookies
@@ -108,10 +112,11 @@ class TestImportCookies:
         result = import_cookies('{"name": "cookie"}')
         assert "格式错误" in result
 
-    def test_missing_session_token(self, cookies_file, monkeypatch):
+    def test_missing_session_token(self, tmp_path, monkeypatch):
+        from mfp_adapter import MFPAdapter, import_cookies
+
+        monkeypatch.setattr(MFPAdapter, "COOKIES_FILE", str(tmp_path / "cookies.json"))
         cookies = json.dumps([{"name": "other", "value": "abc"}])
-        monkeypatch.setattr("mfp_adapter.os.path.join", lambda *args: cookies_file)
-        from mfp_adapter import import_cookies
         result = import_cookies(cookies)
         assert "成功" in result
 

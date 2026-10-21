@@ -1139,7 +1139,8 @@ def import_cookies(json_data: str) -> str:
         if not has_token:
             logger.warning("录入的 Cookie 可能缺少核心 Session 令牌，建议重新登录后导出。")
 
-        cookies_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
+        # 统一走 MFPAdapter 的路径常量，便于测试隔离（避免写入真实凭据文件）
+        cookies_path = MFPAdapter.COOKIES_FILE
         with open(cookies_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
