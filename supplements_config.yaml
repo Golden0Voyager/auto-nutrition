@@ -256,6 +256,22 @@ common_foods:
     micros: { sodium: 300, potassium: 70, cholesterol: 15, saturated_fat: 0.35 }
     aliases: ["火腿片", "火腿", "ham slice", "deli ham"]
 
+  # 中式小炒：USDA 只有生猪肉 (143 kcal/100g)，不含炒制用油，会低估 ~90 kcal/100g
+  cumin_stirfried_pork:
+    name: "Cumin Stir-fried Pork (孜然小炒猪肉片, 每100g)"
+    calories: 235
+    macros: { protein: 19.0, carbs: 2.5, fat: 16.0 }
+    micros: { sodium: 400, potassium: 300, iron: 1.2, saturated_fat: 5.5 }
+    aliases: ["孜然小炒猪肉片", "孜然炒肉", "孜然猪肉", "cumin pork"]
+
+  # 轻食沙拉（含油）：USDA 的 "Vegetable Salad" 会误匹配成凉拌酱 (404 kcal/100g)
+  veggie_salad_with_oil:
+    name: "Vegetable Salad with Olive Oil (纯蔬菜沙拉含油, 每100g)"
+    calories: 100
+    macros: { protein: 1.5, carbs: 6.0, fat: 7.5 }
+    micros: { fiber: 2.0, sugar: 2.5, sodium: 150, potassium: 280, vitamin_c: 20, vitamin_a: 30 }
+    aliases: ["纯蔬菜沙拉", "蔬菜沙拉", "轻食沙拉", "veggie salad", "vegetable salad"]
+
 routines:
   morning_stack:
     name: "晨补 (Morning Stack)"
