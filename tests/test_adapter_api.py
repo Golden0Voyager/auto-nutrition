@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+import requests
 
 
 class TestGetDiaryData:
@@ -120,6 +121,66 @@ class TestGetNutritionGoals:
         adapter.session.get.return_value = resp
 
         with pytest.raises(IndexError):
+            adapter.get_nutrition_goals("2026-01-01")
+
+    def test_falls_back_to_web_on_404(self, adapter):
+        """v2 无 nutrition_goals 端点时必须回退到网页日记解析。"""
+        api_resp = MagicMock()
+        api_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "404 Client Error", response=MagicMock(status_code=404)
+        )
+        web_html = (
+            '<table><tr class="total alt"><td class="first">Your Daily Goal </td>'
+            "<td>2,800</td><td>280 <span>40</span></td><td>93 <span>30</span></td>"
+            "<td>210 <span>30</span></td><td>2,300</td><td>105</td></tr></table>"
+        )
+        web_resp = MagicMock()
+        web_resp.raise_for_status = MagicMock()
+        web_resp.text = web_html
+        adapter.session.get.side_effect = [api_resp, web_resp]
+
+        goals = adapter.get_nutrition_goals("2026-01-01")
+        assert goals["energy"]["value"] == 2800
+        assert goals["carbohydrates"] == 280
+        assert goals["fat"] == 93
+        assert goals["protein"] == 210
+        assert adapter.session.get.call_count == 2
+
+    def test_reraises_non_404(self, adapter):
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "401 Client Error", response=MagicMock(status_code=401)
+        )
+        adapter.session.get.return_value = resp
+
+        with pytest.raises(requests.exceptions.HTTPError):
+            adapter.get_nutrition_goals("2026-01-01")
+
+    def test_web_fallback_without_goal_row(self, adapter):
+        api_resp = MagicMock()
+        api_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "404 Client Error", response=MagicMock(status_code=404)
+        )
+        web_resp = MagicMock()
+        web_resp.raise_for_status = MagicMock()
+        web_resp.text = "<html><body>no goals here</body></html>"
+        adapter.session.get.side_effect = [api_resp, web_resp]
+
+        with pytest.raises(ValueError, match="Your Daily Goal"):
+            adapter.get_nutrition_goals("2026-01-01")
+
+    def test_web_fallback_with_incomplete_goal_row(self, adapter):
+        """目标行存在但数值不足 4 列时（页面改版）应显式失败而不是返回脏数据。"""
+        api_resp = MagicMock()
+        api_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "404 Client Error", response=MagicMock(status_code=404)
+        )
+        web_resp = MagicMock()
+        web_resp.raise_for_status = MagicMock()
+        web_resp.text = '<tr><td>Your Daily Goal </td><td>2,800</td><td>280</td></tr>'
+        adapter.session.get.side_effect = [api_resp, web_resp]
+
+        with pytest.raises(ValueError, match="解析失败"):
             adapter.get_nutrition_goals("2026-01-01")
 
 

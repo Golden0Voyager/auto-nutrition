@@ -931,12 +931,53 @@ class MFPAdapter:
             response.raise_for_status()
             return True
 
+    def _goals_from_web_diary(self, date_str: str) -> dict[str, Any]:
+        """
+        从网页版日记的 "Your Daily Goal" 行解析目标。
+
+        v2 API 已无 nutrition_goals 端点（恒 404），网页日记仍完整渲染该行，
+        列顺序固定为 Calories / Carbs / Fat / Protein / Sodium / Sugar。
+        """
+        response = self.session.get(
+            f"https://www.myfitnesspal.com/food/diary?date={date_str}",
+            headers={"Accept": "text/html"},
+        )
+        response.raise_for_status()
+        html = response.text
+        idx = html.find("Your Daily Goal")
+        if idx == -1:
+            raise ValueError("网页日记中未找到 'Your Daily Goal' 行")
+
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", html[idx:idx + 2500], re.S)
+        values: list[float] = []
+        for cell in cells:
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", cell)).strip()
+            match = re.match(r"^([\d,]+)", text)
+            if match:
+                values.append(float(match.group(1).replace(",", "")))
+        if len(values) < 4:
+            raise ValueError(f"目标行解析失败，仅取到 {values}")
+
+        return {
+            "energy": {"value": values[0]},
+            "carbohydrates": values[1],
+            "fat": values[2],
+            "protein": values[3],
+        }
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def get_nutrition_goals(self, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/nutrition_goals?date={date_str}"
-        response = self.session.get(endpoint)
-        response.raise_for_status()
+        try:
+            response = self.session.get(endpoint)
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            # v2 已移除该资源，回退到网页日记解析；其他错误继续上抛
+            if exc.response is not None and exc.response.status_code == 404:
+                logger.info("v2 无 nutrition_goals 端点，回退到网页日记解析目标")
+                return self._goals_from_web_diary(date_str)
+            raise
         data = response.json()
         return data.get("items", [{}])[0]
 
