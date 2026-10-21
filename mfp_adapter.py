@@ -369,7 +369,7 @@ class MFPAdapter:
     """
 
     BASE_URL = "https://api.myfitnesspal.com/v2"
-    TOKEN_URL = "https://www.myfitnesspal.com/user/auth_token?refresh=true"
+    TOKEN_URL = "https://www.myfitnesspal.com/user/auth_token?refresh=true"  # nosec B105 - 公开端点 URL，非凭据
     COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
     JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutrition_journal.json")
 
@@ -385,10 +385,12 @@ class MFPAdapter:
             "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
         })
 
-        self.access_token = None
-        self.user_id = None
-        self.token_expires_at = 0
-        self._config = None
+        self.access_token: str | None = None
+        self.user_id: str | None = None
+        self.token_expires_at: float = 0
+        self._config: dict[str, Any] | None = None
+        self._config_mtime: float = 0.0
+        self._csrf_token: str = ""
 
         self._load_cookies()
         self._fetch_access_token()
@@ -452,7 +454,7 @@ class MFPAdapter:
             logger.info("Bearer Token 刷新成功 | User ID: {} | 有效期: {}s", self.user_id, expires_in)
         except Exception as exc:
             # 如果请求返回 401 且 Cookie 确实失效，主动清理
-            if isinstance(exc, requests.exceptions.HTTPError) and exc.response.status_code == 401:
+            if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None and exc.response.status_code == 401:
                 logger.warning("检测到会话已彻底失效 (401)，正在置空 Token...")
                 self.access_token = None
             else:
@@ -526,7 +528,7 @@ class MFPAdapter:
     def record_weight(self, weight_kg: float, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/measurements"
-        payload = {"items": [{"type": "measurement", "date": date_str, "value": float(weight_kg), "unit": "kg", "measurement_type": "weight"}]}
+        payload: dict[str, Any] = {"items": [{"type": "measurement", "date": date_str, "value": float(weight_kg), "unit": "kg", "measurement_type": "weight"}]}
         response = self.session.post(endpoint, json=payload)
         response.raise_for_status()
         return {"status": "ok", "weight_kg": weight_kg, "date": date_str}
@@ -538,7 +540,7 @@ class MFPAdapter:
         """
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/diary/water"
-        payload = {
+        payload: dict[str, Any] = {
             "date": date_str,
             "value": int(ml),
             "units": "milliliters"
@@ -662,7 +664,7 @@ class MFPAdapter:
 
         # 预处理：将所有输入转为 Dict，并提取份量
         # AI 预填的 calories/macros 暂存到 ai_ 前缀字段，清空主字段让管线完整执行
-        processed_items = []
+        processed_items: list[dict[str, Any]] = []
         for raw in items:
             if isinstance(raw, str):
                 ratio, display_qty, name = self._parse_quantity(raw)
@@ -703,7 +705,7 @@ class MFPAdapter:
                 processed_items.append(raw.model_dump() if hasattr(raw, 'model_dump') else raw)
 
         # --- 组合/包展开逻辑 ---
-        expanded_items = []
+        expanded_items: list[dict[str, Any]] = []
         conf_data = self._load_config()
         combos = conf_data.get("meal_combos", {}).copy()
         combos.update(conf_data.get("routines", {}))
@@ -876,7 +878,7 @@ class MFPAdapter:
         resp.raise_for_status()
         text = resp.text
 
-        events = []
+        events: list[tuple[str, int, Any]] = []
         for m in re.finditer(r'class="meal_header"[^>]*>.*?<td[^>]*>([^<]+)', text, re.DOTALL):
             meal = m.group(1).strip()
             if meal in ("Breakfast", "Lunch", "Dinner", "Snacks"):
@@ -1080,8 +1082,9 @@ def get_daily_summary(date: str) -> str:
             if weights:
                 latest_weight = weights[0].get("value")
                 user_section = f"\n👤 当前体重: {latest_weight}kg"
-        except Exception:
-            pass
+        except Exception as exc:
+            # 体重只是附加信息，取不到不影响预算计算
+            logger.debug("获取体重失败，已跳过体征展示: {}", exc)
 
         output = (
             f"📅 {date} 营养预算总结:\n"
@@ -1188,7 +1191,7 @@ def get_nutrition_trends(days: int = 7) -> str:
             data = mfp.get_diary_data(date_str)
 
             # 1. 基础宏量统计 (来自 MFP 官方数据，确保包含用户手动录入项)
-            day_stats = {"date": date_str, "calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+            day_stats: dict[str, Any] = {"date": date_str, "calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
 
             # 从 MFP 读取宏量 + 微量营养素
             # diary_meal 提供宏量聚合；food_entry 可能携带完整微量营养素
@@ -1238,7 +1241,7 @@ def get_nutrition_trends(days: int = 7) -> str:
             return "没有找到趋势数据。"
 
         # 整理表头：获取所有出现的 Key 并排序 (日期在前，宏量其次，微量在后)
-        all_keys = set()
+        all_keys: set[str] = set()
         for t in trends:
             all_keys.update(t.keys())
 
@@ -1349,7 +1352,7 @@ def record_exercise(exercise: ExerciseModel) -> str:
         mfp = get_adapter()
         mfp._ensure_token_valid()
 
-        diary_entry = {
+        diary_entry: dict[str, Any] = {
             "type": "exercise_entry",
             "date": exercise.date,
             "exercise_name": exercise.name,

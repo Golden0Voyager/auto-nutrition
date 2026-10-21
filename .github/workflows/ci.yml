@@ -27,9 +27,9 @@ jobs:
         run: uv run ruff check mfp_adapter.py tests/
 
       - name: Run mypy
-        run: uv run mypy mfp_adapter.py || true
+        run: uv run mypy mfp_adapter.py
       - name: Run security scan (bandit)
-        run: uv tool run bandit -r . || true
+        run: uv tool run bandit -c pyproject.toml -r mfp_adapter.py
 
       # `uv audit` is not a subcommand of uv: this step errored on every run and
       # `|| true` turned that into a green tick, so nothing was ever audited.
