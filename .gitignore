@@ -38,3 +38,6 @@ GEMINI.md
 
 # Coverage
 htmlcov/
+
+# git worktrees（AGENTS.md 规定按分支隔离开发）
+.worktrees/
