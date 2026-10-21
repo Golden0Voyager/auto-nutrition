@@ -5,7 +5,7 @@ import sqlite3
 import sys
 import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -417,7 +417,7 @@ class MFPAdapter:
 
     def _load_cookies(self) -> None:
         if not os.path.exists(self.COOKIES_FILE):
-            logger.warning(f"未找到 {self.COOKIES_FILE}，请先执行 `refresh_login` 工具重置登录凭据。")
+            logger.warning(f"未找到 {self.COOKIES_FILE}，请先调用 `get_cookie_guide` 获取教程，再用 `import_cookies` 导入凭据。")
             return
         try:
             with open(self.COOKIES_FILE) as f:
@@ -463,7 +463,7 @@ class MFPAdapter:
         if time.time() > (self.token_expires_at - 3600):
             self._fetch_access_token()
         if not self.access_token:
-            raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `refresh_login` 工具重置登录凭据。")
+            raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `get_cookie_guide` 获取教程，再用 `import_cookies` 导入凭据。")
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def _create_custom_food(self, item: dict[str, Any]) -> dict[str, str]:
@@ -1471,7 +1471,7 @@ def get_current_time() -> str:
     """
     try:
         now = datetime.now()
-        utc_now = datetime.utcnow()
+        utc_now = datetime.now(timezone.utc)  # noqa: UP017 - datetime.UTC 需 Python 3.11+，本项目兼容 3.10
         tz_name = time.tzname[time.daylight] if hasattr(time, 'tzname') else "Unknown"
 
         # 服务端计算建议 meal_type，消除 AI 推断延迟

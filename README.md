@@ -12,6 +12,7 @@
 **现在**：对着 Siri/Claude 说句：“**午饭吃了两百克鸡胸肉和一根香蕉。**” (耗时 2秒)
 *   **智能拆解**：自动提取重量、热量及微量元素（钠、钾、钙等）。
 *   **锚点校准**：通过本地 `supplements_config.yaml` 锁定常驻补剂数据，杜绝 AI 幻觉。
+*   **三级解析**：本地配置 → 本地 USDA 库（7.6 万条） → AI 估值 → 兜底告警。
 
 ### 🏃 专业跑者的“马拉松模式”
 针对马拉松运动员 (Marathon Training) 深度定制：
@@ -33,37 +34,54 @@
 | **运动打卡** | “跑了 10 公里，配速 5:30” | 自动计算有氧时长与热量消耗 |
 | **趋势洞察** | “帮我分析下最近一月的营养趋势” | 抓取 7 天以上数据，监控钠/蛋白偏离度 |
 | **点餐补位** | “蛋白还差 40g，推荐个补位晚餐” | 检索本地高频食物库，给出最优配比建议 |
-| **底层自愈** | “登录过期了，重置一下” | **内置浏览器助手**，无需手动导出 Cookie |
+| **底层自愈** | “登录过期了，重置一下” | **内置 Cookie 导入向导**，无需手写代码 |
+
+---
+
+## 🧰 工具清单 (MCP Tools)
+
+| 工具 | 用途 |
+| :--- | :--- |
+| `record_nutrition` | 录入食物/补剂到指定日期与餐次（支持字符串或结构化对象） |
+| `get_daily_summary` | 当日热量与三大宏量的预算缺口 |
+| `get_nutrition_trends` | 最近 N 天（≤30）趋势，含本地高保真微量元素 |
+| `delete_last_entry` | 按日期/餐次撤回最近记录 |
+| `record_exercise` | 记录有氧/力量训练及消耗 |
+| `record_measurement` | 记录体重 (kg) 或饮水 (ml) |
+| `lookup_food_nutrition` | 查询本地 USDA 库的营养成分 |
+| `get_food_config` | 查看补剂与常驻食物配置 |
+| `import_cookies` | 导入浏览器导出的 Cookie JSON，即时恢复会话 |
+| `get_cookie_guide` | 手动导出 Cookie 的分步教程（绕过验证码） |
+| `get_current_time` | 当前时间 + 建议餐次（服务端计算，消除推断延迟） |
 
 ---
 
 ## 🛠️ 快速起步
 
 1.  **安装环境**：推荐使用 [uv](https://astral.sh/uv) 管理。
-2.  **配置 Auth**：在根目录下放入 `cookies.json`。
-    *   *Tip*: 可调用 `refresh_login` 工具通过弹窗直接登录抓取。
+2.  **配置凭据**：复制 `.env.example` 为 `.env`，填入 `MFP_USERNAME` / `MFP_PASSWORD`；
+    若被 Cloudflare 验证码拦截，改在根目录放入浏览器导出的 `cookies.json`（可调用 `get_cookie_guide` 获取教程，再用 `import_cookies` 导入）。
 3.  **自定义补剂**：修改 `supplements_config.yaml` 打造您的个人营养包。
-4.  **挂载 Claude**：在 `claude_desktop_config.json` 中配置本项目。
+4.  **挂载 Claude**：见下节。
 
----
+### 挂载到 Claude Desktop
 
-## 🌎 国际化标准
-本项目所有工具及参数均支持 **中英双语 (Bilingual)** 描述，无论您使用中文还是英文与 Claude 沟通，系统都能提供最精准的工具调用建议。
+**Step 1. 打开配置文件**
 
----
-*Designed for performance. Engineered for simplicity.*
-父文件夹)*
+macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`
+Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
-#### 2. 添加 Auto_Nutrition 挂载节点
-打开那个配置文件，在根目录的 `mcpServers` 节点下增加以下配置：
+**Step 2. 在 `mcpServers` 下添加节点**
 
-**如果你选择将本包通过远端 GitHub URL 挂载 (免本地克隆)：**
+远端挂载（免本地克隆）：
+
+```json
 {
   "mcpServers": {
     "auto-nutrition": {
       "command": "uvx",
       "args": [
-        "--from", "git+https://github.com/你的用户名/Auto_Nutrition.git",
+        "--from", "git+https://github.com/Golden0Voyager/auto-nutrition.git",
         "auto-nutrition-mcp"
       ]
     }
@@ -71,40 +89,50 @@
 }
 ```
 
-**如果你已经将仓库克隆在本地 (针对像你一样正在本地开发的用户)：**
+本地开发（推荐，便于改代码）：
+
 ```json
 {
   "mcpServers": {
     "auto-nutrition": {
       "command": "uv",
-      "args": [
-        "run",
-        "--python", "python3.10",
-        "mfp_adapter.py"
-      ],
-      "cwd": "/绝对路径/指向/Auto_Nutrition的文件夹",
+      "args": ["run", "--python", "3.12", "mfp_adapter.py"],
+      "cwd": "/绝对路径/指向/auto-nutrition",
       "env": {
-         "PYTHONPATH": "/绝对路径/指向/Auto_Nutrition的文件夹/"
+        "PYTHONPATH": "/绝对路径/指向/auto-nutrition/"
       }
     }
   }
 }
 ```
 
-📝 *注意：无论使用哪种方式，请确保 `cookies.json` 文件位于工作目录 (`cwd`) 下，或者和 `mfp_adapter.py` 放在一起。*
+📝 *注意：无论使用哪种方式，请确保 `cookies.json` 位于 `cwd` 下，或与 `mfp_adapter.py` 放在一起。*
 
-#### 3. 重启 Claude Desktop
-完全退出（Command+Q）并重启 Claude Desktop。观察右下角的 🔨 `插头` / `工具` 图标，点开后如果看到 `record_nutrition`, `get_daily_summary`, `record_weight` 三个工具，说明连接大功告成！
+**Step 3. 重启 Claude Desktop**
 
-## 👨‍💻 二次开发与底层联通测试
+完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 11 个工具即连接成功。
 
-如果你在配置后怀疑没连上，或者你想二次修改代码逻辑：
-1. 确保已在系统级安装 [uv](https://astral.sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`)。
-2. 在该项目根目录下通过终端执行自带的综合测试脚本：
+---
+
+## 👨‍💻 二次开发与测试
+
+1. 安装 [uv](https://astral.sh/uv)：`curl -LsSf https://astral.sh/uv/install.sh | sh`
+2. 安装依赖：`uv sync --extra test`
+3. 单元测试（242 个用例，覆盖率 100%）：
+
    ```bash
-   uv run python test_connection.py
+   uv run pytest --cov=mfp_adapter --cov-report=term-missing
    ```
-3. 如果看到终端中输出“ ✅ 全部测试通过”，即代表你的本地网络和 Cookie 配置一切正常！
+
+4. 真实联通性测试（需有效 Cookie / 账号）：
+
+   ```bash
+   uv run pytest tests/test_connection.py -s
+   ```
+
+   看到 “✅ 全部测试通过” 即代表本地网络与 Cookie 配置正常。
+
+5. 代码检查：`uv run ruff check mfp_adapter.py tests/`
 
 ---
 
