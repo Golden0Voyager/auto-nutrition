@@ -232,6 +232,14 @@ common_foods:
     micros: { sugar: 1.2, iron: 0.5 }
     aliases: ["阿胶糕", "阿胶"]
 
+  # 纯素低脂版：无蛋、无全脂蛋黄酱，USDA 的 "potato salad with egg" (157 kcal/100g) 会高估 ~50 kcal
+  vegan_lowfat_potato_salad:
+    name: "Vegan Low-fat Potato Salad (纯素低脂土豆沙拉, 每100g)"
+    calories: 105
+    macros: { protein: 2.0, carbs: 16.5, fat: 3.0 }
+    micros: { fiber: 1.5, sugar: 1.5, sodium: 220, potassium: 320 }
+    aliases: ["纯素低脂土豆沙拉", "低脂土豆沙拉", "纯素土豆沙拉", "vegan potato salad"]
+
 routines:
   morning_stack:
     name: "晨补 (Morning Stack)"
