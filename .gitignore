@@ -35,6 +35,10 @@ GEMINI.md
 # Toolchain caches
 .ruff_cache/
 .mypy_cache/
+.pytest-tmp/
+
+# Agent workspace data
+.workbuddy-ai/
 
 # Coverage
 htmlcov/
