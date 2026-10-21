@@ -240,6 +240,22 @@ common_foods:
     micros: { fiber: 1.5, sugar: 1.5, sodium: 220, potassium: 320 }
     aliases: ["纯素低脂土豆沙拉", "低脂土豆沙拉", "纯素土豆沙拉", "vegan potato salad"]
 
+  # 烘焙类：USDA 的 "Coconut Toast" 会误匹配成生椰肉 (354 kcal/100g, F33)，差一个数量级
+  coconut_toast:
+    name: "Coconut Toast (椰蓉吐司 1片约50g)"
+    calories: 175
+    macros: { protein: 5.0, carbs: 24.0, fat: 7.0 }
+    micros: { sugar: 8.0, fiber: 1.2, sodium: 160, saturated_fat: 4.5 }
+    aliases: ["椰蓉吐司", "椰蓉面包", "coconut toast"]
+
+  # 火腿片：USDA 只给出生猪肉腿 (136 kcal/100g, 标注 raw)，早餐火腿片按熟制 25g/片
+  ham_slice:
+    name: "Ham Slice (火腿片 1片约25g)"
+    calories: 30
+    macros: { protein: 4.5, carbs: 0.5, fat: 1.0 }
+    micros: { sodium: 300, potassium: 70, cholesterol: 15, saturated_fat: 0.35 }
+    aliases: ["火腿片", "火腿", "ham slice", "deli ham"]
+
 routines:
   morning_stack:
     name: "晨补 (Morning Stack)"
