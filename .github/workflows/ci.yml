@@ -31,8 +31,12 @@ jobs:
       - name: Run security scan (bandit)
         run: uv tool run bandit -r . || true
 
-      - name: Run dependency audit
-        run: uv audit || true
+      # `uv audit` is not a subcommand of uv: this step errored on every run and
+      # `|| true` turned that into a green tick, so nothing was ever audited.
+      - name: Audit dependencies
+        run: |
+          uv export --frozen --no-emit-project --format requirements-txt --no-hashes > "$RUNNER_TEMP/requirements.txt"
+          uvx pip-audit@2.10.1 --disable-pip --no-deps -r "$RUNNER_TEMP/requirements.txt" --progress-spinner off
 
 
       - name: Run tests with coverage
