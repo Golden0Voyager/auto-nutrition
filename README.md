@@ -43,7 +43,7 @@
 | 工具 | 用途 |
 | :--- | :--- |
 | `record_nutrition` | 录入食物/补剂到指定日期与餐次（支持字符串或结构化对象） |
-| `record_meal` | 把 MFP 自定义套餐（My Meals）整体写入某一餐 |
+| `record_meal` | 把 MFP 自定义套餐（My Meals）整体写入某一餐；传 meal_id 或套餐名（支持模糊匹配，歧义时返回候选） |
 | `list_my_meals` | 列出 MFP 账号里的自定义套餐（meal_id / 食物数 / 总热量） |
 | `get_daily_summary` | 当日热量与三大宏量的预算缺口 |
 | `get_nutrition_trends` | 最近 N 天（≤30）趋势，含本地高保真微量元素 |
