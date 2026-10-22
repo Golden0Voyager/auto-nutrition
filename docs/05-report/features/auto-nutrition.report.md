@@ -38,6 +38,7 @@
 | 维护 | `delete_last_entry`、`import_cookies`、`get_cookie_guide` |
 
 > `record_meal` / `list_my_meals` 面向 MFP 服务端自定义套餐（My Meals）。v2 API 既不开放 meals 读取（401 scope）也不接受 meal 类型日记条目（400），故读走网页 session 接口 `/api/services/users/meals/mine`，写按套餐数值展开为逐条 `food_entry`。
+> `record_meal` 的 `meal_ref` 接受 meal_id 或套餐名称（精确 + difflib 模糊匹配）；命中多个候选时返回候选列表交由调用方选择，不猜测。
 
 ### 2.2 营养数据解析优先级
 

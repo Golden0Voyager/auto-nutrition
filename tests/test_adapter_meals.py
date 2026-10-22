@@ -143,7 +143,7 @@ class TestRecordMeal:
     def test_meal_not_found_lists_available(self, adapter, no_sleep):
         self._stub(adapter)
 
-        with pytest.raises(ValueError, match="未找到 meal_id=999"):
+        with pytest.raises(ValueError, match="未找到套餐「999」"):
             adapter.record_meal("2026-01-01", "dinner", 999)
 
     def test_meal_not_found_when_no_meals(self, adapter, no_sleep):
@@ -208,3 +208,96 @@ class TestRecordMeal:
 
         entry = adapter._post_diary_entry.call_args[0][0]
         assert entry["meal_name"] == "Snacks"
+
+
+class TestResolveMeal:
+    """meal_ref 支持 ID / 精确名称 / 模糊名称，歧义时必须报错而不是猜测。"""
+
+    MEALS = [
+        {"meal_id": 5083761427, "name": "Milk Protein Shake", "food_count": 2,
+         "totals": {"calories": 239.0, "protein": 29.0, "carbs": 14.0, "fat": 8.0}, "foods": []},
+        {"meal_id": 5083755153, "name": "Milk Oatmeal", "food_count": 2,
+         "totals": {"calories": 449.0, "protein": 18.0, "carbs": 66.0, "fat": 13.0}, "foods": []},
+        {"meal_id": 5083746902, "name": "Ham & Egg Avo Ciabatta", "food_count": 4,
+         "totals": {"calories": 384.0, "protein": 18.0, "carbs": 35.0, "fat": 19.0}, "foods": []},
+    ]
+
+    def test_by_id(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, 5083755153)
+        assert meal["name"] == "Milk Oatmeal"
+
+    def test_by_digit_string(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, "5083746902")
+        assert meal["name"] == "Ham & Egg Avo Ciabatta"
+
+    def test_by_exact_name_case_insensitive(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, "  milk protein shake ")
+        assert meal["meal_id"] == 5083761427
+
+    def test_by_fuzzy_name_typo(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, "Milk Protein Shke")
+        assert meal["meal_id"] == 5083761427
+
+    def test_by_partial_name(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, "Protein Shake")
+        assert meal["meal_id"] == 5083761427
+
+    def test_by_unique_substring(self, adapter):
+        meal = adapter._resolve_meal(self.MEALS, "Ciabatta")
+        assert meal["meal_id"] == 5083746902
+
+    def test_ambiguous_substring_lists_candidates(self, adapter):
+        with pytest.raises(ValueError, match="匹配到多个套餐") as exc:
+            adapter._resolve_meal(self.MEALS, "Milk")
+        assert "5083761427" in str(exc.value)
+        assert "5083755153" in str(exc.value)
+
+    def test_ambiguous_name_lists_candidates(self, adapter):
+        dup = dict(self.MEALS[0])
+        dup["meal_id"] = 999
+        dup["totals"] = {"calories": 300.0, "protein": 29.0, "carbs": 14.0, "fat": 8.0}
+        with pytest.raises(ValueError, match="匹配到多个套餐") as exc:
+            adapter._resolve_meal(self.MEALS + [dup], "Milk Protein Shake")
+        assert "5083761427" in str(exc.value)
+        assert "999" in str(exc.value)
+
+    def test_duplicate_exact_names_are_ambiguous(self, adapter):
+        dup = dict(self.MEALS[1])
+        dup["meal_id"] = 999
+        with pytest.raises(ValueError, match="匹配到多个套餐"):
+            adapter._resolve_meal(self.MEALS + [dup], "Milk Oatmeal")
+
+    def test_fuzzy_ambiguity_lists_candidates(self, adapter):
+        """查询词与两个相近名称都高置信命中（且无精确命中）时，走模糊歧义分支。"""
+        variant = dict(self.MEALS[0])
+        variant["meal_id"] = 999
+        variant["name"] = "Milk Protein Shake XL"
+        with pytest.raises(ValueError, match="匹配到多个套餐") as exc:
+            adapter._resolve_meal([self.MEALS[0], variant], "Milk Protein Shakee")
+        assert "5083761427" in str(exc.value)
+        assert "999" in str(exc.value)
+
+    def test_not_found_lists_all(self, adapter):
+        with pytest.raises(ValueError, match="未找到套餐") as exc:
+            adapter._resolve_meal(self.MEALS, "蛋白粉牛奶")
+        assert "Milk Protein Shake" in str(exc.value)
+        assert "Milk Oatmeal" in str(exc.value)
+
+    def test_not_found_when_no_meals(self, adapter):
+        with pytest.raises(ValueError, match="当前可用套餐: 无"):
+            adapter._resolve_meal([], "anything")
+
+    def test_record_meal_by_name(self, adapter, no_sleep):
+        adapter.session.get.return_value = _json_resp([
+            {"meal_id": 5083761427, "description": "Milk Protein Shake",
+             "foods": [{"description": "Whole Milk, 1 cup", "calories": 149, "carbs": 12,
+                        "fat": 8, "protein": 8, "sodium": 105, "sugar": 12}]},
+        ])
+        adapter._create_custom_food = MagicMock(return_value={"id": "food-1", "version": 1})
+        adapter._post_diary_entry = MagicMock()
+
+        result = adapter.record_meal("2026-01-01", "snack", "Milk Protein Shke")
+
+        assert result["meal"] == "Milk Protein Shake"
+        assert result["count"] == 1
+        assert adapter._post_diary_entry.call_count == 1

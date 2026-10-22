@@ -82,6 +82,18 @@ class TestRecordMealTool:
             assert "牛奶蛋白粉" in result
             mock_get_adapter.record_meal.assert_called_once_with("2026-01-01", "dinner", 4424592565)
 
+    def test_accepts_meal_name(self, mock_get_adapter):
+        mock_get_adapter.record_meal.return_value = {
+            "status": "ok", "meal": "Milk Protein Shake", "meal_id": 5083761427, "count": 2,
+            "totals": {"calories": 239.0, "protein": 29.0, "carbs": 14.0, "fat": 8.0},
+        }
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_meal
+            result = record_meal("2026-01-01", "snack", "Milk Protein Shake")
+            assert "成功写入套餐" in result
+            mock_get_adapter.record_meal.assert_called_once_with("2026-01-01", "snack", "Milk Protein Shake")
+
     def test_time_warning_different_date(self, mock_get_adapter):
         mock_get_adapter.record_meal.return_value = {
             "status": "ok", "meal": "测试套餐", "meal_id": 1, "count": 1,
@@ -94,13 +106,13 @@ class TestRecordMealTool:
             assert "注意" in result
 
     def test_error(self, mock_get_adapter):
-        mock_get_adapter.record_meal.side_effect = ValueError("未找到 meal_id=999 的套餐。当前可用套餐: 牛奶蛋白粉(id=4424592565)")
+        mock_get_adapter.record_meal.side_effect = ValueError("未找到套餐「蛋白粉牛奶」。当前可用套餐: Milk Oatmeal(id=5083755153), Milk Protein Shake(id=5083761427)")
 
         with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
             from mfp_adapter import record_meal
-            result = record_meal("2026-01-01", "dinner", 999)
+            result = record_meal("2026-01-01", "dinner", "蛋白粉牛奶")
             assert "错误" in result
-            assert "4424592565" in result
+            assert "5083761427" in result
 
 
 class TestMealTimeWarnings:

@@ -1,3 +1,4 @@
+import difflib
 import json
 import os
 import re
@@ -845,23 +846,73 @@ class MFPAdapter:
             })
         return meals
 
-    def record_meal(self, date_str: str, meal_type: str, meal_id: int) -> dict[str, Any]:
+    def _resolve_meal(self, meals: list[dict[str, Any]], meal_ref: int | str) -> dict[str, Any]:
+        """
+        把 meal_id 或套餐名称解析为唯一套餐。
+
+        匹配顺序：数字 ID → 名称精确（大小写/空白不敏感）→ 唯一子串包含 →
+        名称模糊（difflib）。歧义（多个候选）时抛出错误并列出候选，绝不猜测。
+        """
+        # 1) 数字 ID（int 或纯数字字符串）精确匹配
+        target = next((m for m in meals if str(m.get("meal_id")) == str(meal_ref)), None)
+        if target is not None:
+            return target
+
+        if isinstance(meal_ref, str):
+            needle = meal_ref.strip().lower()
+
+            # 2) 名称精确匹配
+            exact = [m for m in meals if m["name"].strip().lower() == needle]
+            if len(exact) == 1:
+                return exact[0]
+            if len(exact) > 1:
+                return self._ambiguous(meal_ref, exact)
+
+            # 3) 唯一子串包含（如 "Ciabatta" → "Ham & Egg Avo Ciabatta"）
+            contained = [m for m in meals if needle and needle in m["name"].strip().lower()]
+            if len(contained) == 1:
+                return contained[0]
+            if len(contained) > 1:
+                return self._ambiguous(meal_ref, contained)
+
+            # 4) 名称模糊匹配（容忍拼写差异与部分词重叠）
+            scored = [
+                (difflib.SequenceMatcher(None, needle, m["name"].strip().lower()).ratio(), m)
+                for m in meals
+            ]
+            best = max((s for s, _ in scored), default=0.0)
+            if best >= 0.6:
+                candidates = [m for s, m in scored if s >= max(0.6, best - 0.15)]
+                if len(candidates) == 1:
+                    return candidates[0]
+                return self._ambiguous(meal_ref, candidates)
+
+        available = ", ".join(f"{m['name']}(id={m['meal_id']})" for m in meals) or "无"
+        raise ValueError(f"未找到套餐「{meal_ref}」。当前可用套餐: {available}")
+
+    @staticmethod
+    def _ambiguous(meal_ref: int | str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        listed = ", ".join(
+            f"{m['name']}(id={m['meal_id']}, {m['totals']['calories']:.0f} kcal)" for m in candidates
+        )
+        raise ValueError(f"「{meal_ref}」匹配到多个套餐: {listed}。请用 meal_id 指定。")
+
+    def record_meal(self, date_str: str, meal_type: str, meal_ref: int | str) -> dict[str, Any]:
         """
         把 MFP 自定义套餐整体写入某一餐。
 
         v2 日记不接受 meal 类型条目（400 Unrecognized diary entry type），
         因此按套餐自带数值把每项食物展开为独立 food_entry，与网页端
         "整份加入日记" 的落地效果一致。套餐数值优先，不经配置/USDA 管线。
+
+        meal_ref 可传 meal_id（list_my_meals 获取）或套餐名称（精确/模糊匹配）。
         """
         self._ensure_token_valid()
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         meal_name = meal_map.get(meal_type.lower(), "Snacks")
 
         meals = self.get_my_meals()
-        meal = next((m for m in meals if str(m.get("meal_id")) == str(meal_id)), None)
-        if meal is None:
-            available = ", ".join(f"{m['name']}(id={m['meal_id']})" for m in meals) or "无"
-            raise ValueError(f"未找到 meal_id={meal_id} 的套餐。当前可用套餐: {available}")
+        meal = self._resolve_meal(meals, meal_ref)
 
         foods = meal.get("foods", [])
         if not foods:
@@ -1202,23 +1253,25 @@ def list_my_meals() -> str:
         return f"错误: {exc}"
 
 @mcp.tool()
-def record_meal(date: str, meal_type: str, meal_id: int) -> str:
+def record_meal(date: str, meal_type: str, meal_ref: int | str) -> str:
     """
     Write a saved MyFitnessPal meal (套餐) into the diary as one meal.
     把 MFP 自定义套餐整体写入某一餐（内部按套餐数值展开为逐条食物）。
 
-    工作流程：先调用 list_my_meals 取得 meal_id，再调用本工具。
+    工作流程：先调用 list_my_meals 查看可选套餐，再调用本工具。
     套餐内每项食物使用套餐自带的热量/宏量值，不经过配置/USDA 管线。
 
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         meal_type (str): breakfast, lunch, dinner, or snack. | 餐次类型。
-        meal_id (int): Meal ID from list_my_meals. | 套餐 ID（来自 list_my_meals）。
+        meal_ref (int | str): Meal ID from list_my_meals, or the meal name.
+            | 套餐 ID（来自 list_my_meals）或套餐名称；名称支持精确与模糊匹配，
+            多个候选时会返回候选列表而不会猜测。
     """
     try:
         mfp = get_adapter()
         time_warnings = _meal_time_warnings(date, meal_type)
-        result = mfp.record_meal(date, meal_type, meal_id)
+        result = mfp.record_meal(date, meal_type, meal_ref)
 
         totals = result["totals"]
         output = (
