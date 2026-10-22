@@ -1,7 +1,7 @@
 # Completion Report: Auto_Nutrition
 
 > 版本：`v1.3.x`（`pyproject` 标 1.3.0，最新 tag `v1.3.1`）
-> 代码规模：`mfp_adapter.py` 1,508 行 / 11 个 MCP tool；测试 15 个模块 242 用例
+> 代码规模：`mfp_adapter.py` 1,719 行 / 13 个 MCP tool；测试 16 个模块 270 用例
 
 ## 1. Executive Summary
 
@@ -15,13 +15,13 @@
 | **降低幻觉** | LLM 对小众菜品 / 补剂的数值靠猜 | 三级解析：本地配置 → USDA 库 → AI 估值 → 兜底告警 | 补剂与地域菜数值稳定可复现 |
 | **离线可查** | 依赖 MFP 接口返回微量元素 | 本地 `usda_core.db`（76,668 条）+ 本地流水账 | 钠钾等微量元素不再缺失 |
 | **自愈能力** | Cookie 过期、Cloudflare 验证码阻断 | `get_cookie_guide` + `import_cookies` | 1 分钟恢复，不必改代码 |
-| **可维护** | 单文件 1,500 行易腐化 | 242 测试 / 100% 覆盖 / 四道 CI 门禁 | 改动有兜底 |
+| **可维护** | 单文件 1,500 行易腐化 | 270 测试 / 100% 覆盖 / 四道 CI 门禁 | 改动有兜底 |
 
 ## 2. 系统组件与交付物
 
 | 组件 | 文件 | 说明 |
 | :--- | :--- | :--- |
-| MCP Server | `mfp_adapter.py` | FastMCP，11 个 tool，stdio 传输 |
+| MCP Server | `mfp_adapter.py` | FastMCP，13 个 tool，stdio 传输 |
 | 营养解析器 | `USDALocalResolver` | SQLite FTS5 全文检索 + 相关性打分，旧 schema 回退 |
 | 配置锚点 | `supplements_config.yaml` | 12 补剂 + 3 地域菜 + 6 常驻食物 + 4 补剂包 + 1 套餐 |
 | 本地数据 | `usda_core.db` | 76,668 食物 / 477 营养素，57 MB |
@@ -29,13 +29,15 @@
 | Parser Prompt | `system_prompt.txt` | 262 行，多模态 + 时间感知 + 静默调用 |
 | 自动化 | `.github/workflows/ci.yml` | ruff / mypy / bandit / pip-audit / pytest+coverage |
 
-### 2.1 工具清单（11）
+### 2.1 工具清单（13）
 
 | 类别 | 工具 |
 | :--- | :--- |
-| 写入 | `record_nutrition`、`record_exercise`、`record_measurement` |
-| 读取 | `get_daily_summary`、`get_nutrition_trends`、`lookup_food_nutrition`、`get_food_config`、`get_current_time` |
+| 写入 | `record_nutrition`、`record_meal`、`record_exercise`、`record_measurement` |
+| 读取 | `get_daily_summary`、`get_nutrition_trends`、`lookup_food_nutrition`、`get_food_config`、`get_current_time`、`list_my_meals` |
 | 维护 | `delete_last_entry`、`import_cookies`、`get_cookie_guide` |
+
+> `record_meal` / `list_my_meals` 面向 MFP 服务端自定义套餐（My Meals）。v2 API 既不开放 meals 读取（401 scope）也不接受 meal 类型日记条目（400），故读走网页 session 接口 `/api/services/users/meals/mine`，写按套餐数值展开为逐条 `food_entry`。
 
 ### 2.2 营养数据解析优先级
 
@@ -56,8 +58,8 @@
 
 | 指标 | 结果 |
 | :--- | :--- |
-| 测试 | 242 passed |
-| 覆盖率 | 100%（834 statements，`fail_under = 85`） |
+| 测试 | 270 passed |
+| 覆盖率 | 100%（936 statements，`fail_under = 85`） |
 | ruff | 通过（阻塞） |
 | mypy | 0 error（阻塞） |
 | bandit | 0 issue（阻塞） |
