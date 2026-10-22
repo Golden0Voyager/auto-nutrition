@@ -1,7 +1,7 @@
 # Gap Analysis: Auto_Nutrition
 
 > 验证开发实现与 PRD 需求的匹配程度。
-> 基线：`main` @ v1.3.x（2026-10），`mfp_adapter.py` 1,508 行 / 11 个 MCP tool。
+> 基线：`main` @ v1.3.x（2026-10），`mfp_adapter.py` 1,719 行 / 13 个 MCP tool。
 
 ## 1. 需求核对表 (Requirement Checklist)
 

@@ -43,6 +43,8 @@
 | 工具 | 用途 |
 | :--- | :--- |
 | `record_nutrition` | 录入食物/补剂到指定日期与餐次（支持字符串或结构化对象） |
+| `record_meal` | 把 MFP 自定义套餐（My Meals）整体写入某一餐 |
+| `list_my_meals` | 列出 MFP 账号里的自定义套餐（meal_id / 食物数 / 总热量） |
 | `get_daily_summary` | 当日热量与三大宏量的预算缺口 |
 | `get_nutrition_trends` | 最近 N 天（≤30）趋势，含本地高保真微量元素 |
 | `delete_last_entry` | 按日期/餐次撤回最近记录 |
@@ -110,7 +112,7 @@ Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
 **Step 3. 重启 Claude Desktop**
 
-完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 11 个工具即连接成功。
+完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 13 个工具即连接成功。
 
 ---
 

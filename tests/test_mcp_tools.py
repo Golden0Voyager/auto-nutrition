@@ -36,6 +36,107 @@ class TestRecordNutritionTool:
             assert "成功写入" in result
 
 
+class TestListMyMeals:
+    def test_success(self, mock_get_adapter):
+        mock_get_adapter.get_my_meals.return_value = [
+            {"meal_id": 4424592565, "name": "牛奶蛋白粉", "food_count": 2,
+             "totals": {"calories": 727.0, "protein": 15.0, "carbs": 57.0, "fat": 47.0},
+             "foods": []},
+        ]
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import list_my_meals
+            result = list_my_meals()
+            assert "4424592565" in result
+            assert "牛奶蛋白粉" in result
+            assert "727" in result
+
+    def test_empty(self, mock_get_adapter):
+        mock_get_adapter.get_my_meals.return_value = []
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import list_my_meals
+            result = list_my_meals()
+            assert "还没有自定义套餐" in result
+
+    def test_error(self, mock_get_adapter):
+        mock_get_adapter.get_my_meals.side_effect = Exception("401 Unauthorized")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import list_my_meals
+            result = list_my_meals()
+            assert "错误" in result
+
+
+class TestRecordMealTool:
+    def test_success(self, mock_get_adapter):
+        mock_get_adapter.record_meal.return_value = {
+            "status": "ok", "meal": "牛奶蛋白粉", "meal_id": 4424592565, "count": 2,
+            "totals": {"calories": 727.0, "protein": 15.0, "carbs": 57.0, "fat": 47.0},
+        }
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_meal
+            result = record_meal("2026-01-01", "dinner", 4424592565)
+            assert "成功写入套餐" in result
+            assert "牛奶蛋白粉" in result
+            mock_get_adapter.record_meal.assert_called_once_with("2026-01-01", "dinner", 4424592565)
+
+    def test_time_warning_different_date(self, mock_get_adapter):
+        mock_get_adapter.record_meal.return_value = {
+            "status": "ok", "meal": "测试套餐", "meal_id": 1, "count": 1,
+            "totals": {"calories": 100.0, "protein": 1.0, "carbs": 1.0, "fat": 1.0},
+        }
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_meal
+            result = record_meal("2025-01-01", "lunch", 1)
+            assert "注意" in result
+
+    def test_error(self, mock_get_adapter):
+        mock_get_adapter.record_meal.side_effect = ValueError("未找到 meal_id=999 的套餐。当前可用套餐: 牛奶蛋白粉(id=4424592565)")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_meal
+            result = record_meal("2026-01-01", "dinner", 999)
+            assert "错误" in result
+            assert "4424592565" in result
+
+
+class TestMealTimeWarnings:
+    def test_date_mismatch(self):
+        from mfp_adapter import _meal_time_warnings
+        warnings = _meal_time_warnings("2020-01-01", "lunch")
+        assert any("注意" in w for w in warnings)
+
+    def test_meal_mismatch_uses_frozen_clock(self, monkeypatch):
+        import datetime as dt
+
+        from mfp_adapter import _meal_time_warnings
+
+        class FrozenDatetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 22, 12, 0, 0)
+
+        monkeypatch.setattr("mfp_adapter.datetime", FrozenDatetime)
+        warnings = _meal_time_warnings("2026-10-22", "dinner")
+        assert any("通常对应 lunch" in w for w in warnings)
+
+    def test_matching_meal_no_warning(self, monkeypatch):
+        import datetime as dt
+
+        from mfp_adapter import _meal_time_warnings
+
+        class FrozenDatetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 22, 12, 0, 0)
+
+        monkeypatch.setattr("mfp_adapter.datetime", FrozenDatetime)
+        assert _meal_time_warnings("2026-10-22", "lunch") == []
+
+
 class TestGetDailySummary:
     def test_success(self, mock_get_adapter):
         mock_get_adapter.get_diary_data.return_value = {

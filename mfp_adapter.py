@@ -370,6 +370,8 @@ class MFPAdapter:
 
     BASE_URL = "https://api.myfitnesspal.com/v2"
     TOKEN_URL = "https://www.myfitnesspal.com/user/auth_token?refresh=true"  # nosec B105 - 公开端点 URL，非凭据
+    # 自定义套餐（My Meals）只能走网页 session cookie：/v2/meals 对 Bearer token 返回 401 scope 未授权
+    MEALS_URL = "https://www.myfitnesspal.com/api/services/users/meals/mine"
     COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
     JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutrition_journal.json")
 
@@ -813,6 +815,110 @@ class MFPAdapter:
             result["warnings"] = [f'⚠️ 以下食物未匹配到营养数据，以 0 kcal 录入: {", ".join(unmatched)}']
         return result
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
+    def get_my_meals(self) -> list[dict[str, Any]]:
+        """
+        读取 MFP 服务端的自定义套餐（My Meals）。
+
+        该接口走网页 session cookie 认证（Bearer token 无对应 scope）。
+        返回规范化结构：meal_id / name / food_count / totals / foods。
+        """
+        response = self.session.get(self.MEALS_URL, headers={"Accept": "application/json"})
+        response.raise_for_status()
+        raw_meals = response.json()
+
+        meals: list[dict[str, Any]] = []
+        for raw in raw_meals:
+            foods = raw.get("foods", []) or []
+            totals = {
+                "calories": round(sum(float(f.get("calories") or 0) for f in foods), 1),
+                "protein": round(sum(float(f.get("protein") or 0) for f in foods), 1),
+                "carbs": round(sum(float(f.get("carbs") or 0) for f in foods), 1),
+                "fat": round(sum(float(f.get("fat") or 0) for f in foods), 1),
+            }
+            meals.append({
+                "meal_id": raw.get("meal_id"),
+                "name": raw.get("description", ""),
+                "food_count": len(foods),
+                "totals": totals,
+                "foods": foods,
+            })
+        return meals
+
+    def record_meal(self, date_str: str, meal_type: str, meal_id: int) -> dict[str, Any]:
+        """
+        把 MFP 自定义套餐整体写入某一餐。
+
+        v2 日记不接受 meal 类型条目（400 Unrecognized diary entry type），
+        因此按套餐自带数值把每项食物展开为独立 food_entry，与网页端
+        "整份加入日记" 的落地效果一致。套餐数值优先，不经配置/USDA 管线。
+        """
+        self._ensure_token_valid()
+        meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
+        meal_name = meal_map.get(meal_type.lower(), "Snacks")
+
+        meals = self.get_my_meals()
+        meal = next((m for m in meals if str(m.get("meal_id")) == str(meal_id)), None)
+        if meal is None:
+            available = ", ".join(f"{m['name']}(id={m['meal_id']})" for m in meals) or "无"
+            raise ValueError(f"未找到 meal_id={meal_id} 的套餐。当前可用套餐: {available}")
+
+        foods = meal.get("foods", [])
+        if not foods:
+            raise ValueError(f"套餐「{meal['name']}」没有任何食物，无法写入。")
+
+        items: list[dict[str, Any]] = []
+        results = []
+        for food in foods:
+            item = {
+                "name": food.get("description") or "未命名食物",
+                "calories": float(food.get("calories") or 0),
+                "macros": {
+                    k: float(food[k])
+                    for k in ("protein", "carbs", "fat", "sodium", "sugar")
+                    if food.get(k) is not None
+                },
+                "source_meal": meal["name"],
+            }
+            items.append(item)
+
+            try:
+                time.sleep(0.5)
+                food_ref = self._create_custom_food(item)
+                diary_entry = {
+                    "type": "food_entry",
+                    "date": date_str,
+                    "meal_name": meal_name,
+                    "food": {"id": food_ref["id"], "version": food_ref["version"]},
+                    "servings": 1.0,
+                    "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
+                    "client_id": "mfp-main-js"
+                }
+                self._post_diary_entry(diary_entry)
+                results.append({"name": item["name"], "calories": item["calories"], "status": "ok"})
+                logger.info('套餐录入: "{name}" ({cal} kcal)', name=item["name"], cal=item["calories"])
+            except requests.exceptions.HTTPError as he:
+                err_detail = he.response.text if hasattr(he, 'response') and he.response is not None else str(he)
+                logger.error('套餐内 "{name}" 被 API 拒绝: {error}', name=item["name"], error=err_detail)
+                results.append({"name": item["name"], "calories": item["calories"], "status": "error", "error": err_detail})
+            except Exception as e:
+                logger.error('套餐内 "{name}" 录入失败: {error}', name=item["name"], error=e)
+                results.append({"name": item["name"], "calories": item["calories"], "status": "error", "error": str(e)})
+
+        self._log_to_local_journal(date_str, meal_name, items)
+
+        failed = [r["name"] for r in results if r["status"] == "error"]
+        result = {
+            "status": "ok" if not failed else "partial",
+            "meal": meal["name"],
+            "meal_id": meal.get("meal_id"),
+            "count": len(results),
+            "totals": meal["totals"],
+        }
+        if failed:
+            result["warnings"] = [f'⚠️ 以下食物写入失败: {", ".join(failed)}']
+        return result
+
     def _log_to_local_journal(self, date_str: str, meal_name: str, items: list[dict[str, Any]]) -> None:
         """
         在本地保存完整的营养数据副本，包括 MFP 不支持的微量元素。
@@ -996,6 +1102,32 @@ def get_adapter():
         adapter = MFPAdapter()
     return adapter
 
+def _meal_time_warnings(date_str: str, meal_type: str) -> list[str]:
+    """餐次与系统时间的偏差提示，record_nutrition / record_meal 共用。"""
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    warnings: list[str] = []
+    if date_str != today_str:
+        warnings.append(f"⚠️ 注意：当前日期为 {today_str}，但正在录入 {date_str} 的数据。")
+
+    hour = now.hour
+    expected_meals = {
+        range(5, 10): "breakfast",
+        range(10, 14): "lunch",
+        range(14, 17): "snack",
+        range(17, 21): "dinner",
+    }
+    expected = "snack"
+    for r, m in expected_meals.items():
+        if hour in r:
+            expected = m
+            break
+    if date_str == today_str and meal_type.lower() != expected:
+        warnings.append(
+            f"💡 提示：当前时间 {now.strftime('%H:%M')} 通常对应 {expected}，但录入了 {meal_type}。"
+        )
+    return warnings
+
 @mcp.tool()
 def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
     """
@@ -1034,32 +1166,66 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
         mfp = get_adapter()
 
         # 🛡️ 服务端时间校验防护层
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        time_warnings = []
-        if date != today_str:
-            time_warnings.append(f"⚠️ 注意：当前日期为 {today_str}，但正在录入 {date} 的数据。")
-
-        hour = now.hour
-        expected_meals = {
-            range(5, 10): "breakfast",
-            range(10, 14): "lunch",
-            range(14, 17): "snack",
-            range(17, 21): "dinner",
-        }
-        expected = "snack"
-        for r, m in expected_meals.items():
-            if hour in r:
-                expected = m
-                break
-        if date == today_str and meal_type.lower() != expected:
-            time_warnings.append(
-                f"💡 提示：当前时间 {now.strftime('%H:%M')} 通常对应 {expected}，但录入了 {meal_type}。"
-            )
+        time_warnings = _meal_time_warnings(date, meal_type)
 
         result = mfp.record_nutrition(date, meal_type, items)
 
         output = f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
+        if time_warnings:
+            output += "\n\n" + "\n".join(time_warnings)
+        return output
+    except Exception as exc:
+        return f"错误: {exc}"
+
+@mcp.tool()
+def list_my_meals() -> str:
+    """
+    List custom meals (套餐) saved in the MyFitnessPal account.
+    列出 MFP 账号里的自定义套餐（My Meals），含 meal_id、食物数与总热量。
+
+    录入套餐前先调用本工具获取 meal_id；同名套餐必须靠 id 区分。
+    """
+    try:
+        mfp = get_adapter()
+        meals = mfp.get_my_meals()
+        if not meals:
+            return "你的 MyFitnessPal 还没有自定义套餐。可在 myfitnesspal.com/meal/mine 创建，再用 record_meal 录入。"
+        lines = [f"共 {len(meals)} 个自定义套餐："]
+        for m in meals:
+            t = m["totals"]
+            lines.append(
+                f"- [{m['meal_id']}] {m['name']} | {m['food_count']} 项 | "
+                f"{t['calories']:.0f} kcal | P {t['protein']:.1f} / C {t['carbs']:.1f} / F {t['fat']:.1f}"
+            )
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"错误: {exc}"
+
+@mcp.tool()
+def record_meal(date: str, meal_type: str, meal_id: int) -> str:
+    """
+    Write a saved MyFitnessPal meal (套餐) into the diary as one meal.
+    把 MFP 自定义套餐整体写入某一餐（内部按套餐数值展开为逐条食物）。
+
+    工作流程：先调用 list_my_meals 取得 meal_id，再调用本工具。
+    套餐内每项食物使用套餐自带的热量/宏量值，不经过配置/USDA 管线。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        meal_type (str): breakfast, lunch, dinner, or snack. | 餐次类型。
+        meal_id (int): Meal ID from list_my_meals. | 套餐 ID（来自 list_my_meals）。
+    """
+    try:
+        mfp = get_adapter()
+        time_warnings = _meal_time_warnings(date, meal_type)
+        result = mfp.record_meal(date, meal_type, meal_id)
+
+        totals = result["totals"]
+        output = (
+            f"成功写入套餐「{result['meal']}」到 {meal_type}"
+            f"（{result['count']} 项，{totals['calories']:.0f} kcal）。\n"
+            f"详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
+        )
         if time_warnings:
             output += "\n\n" + "\n".join(time_warnings)
         return output
