@@ -549,14 +549,59 @@ class MFPAdapter:
         response.raise_for_status()
         return response.json()
 
+    def _get_weight_items(self, date_str: str) -> list[dict[str, Any]]:
+        """读取某日的体重记录（MFP 每日最多一条）。"""
+        response = self.session.get(f"{self.BASE_URL}/measurements", params={"type": "weight"})
+        response.raise_for_status()
+        items = response.json().get("items") or []
+        return [i for i in items if i.get("date") == date_str]
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def record_weight(self, weight_kg: float, date_str: str) -> dict[str, Any]:
+        """写入体重。
+
+        真实载荷：``{"type": "weight", "date", "value", "unit": "kilograms"}``
+        （旧实现用 ``type:"measurement"`` + ``measurement_type:"weight"``，
+        MFP 返回 200 但 **items 为空、静默不落库**）。
+        同日重复 POST 不会更新旧值，所以「改体重」必须先删再写。
+        """
         self._ensure_token_valid()
+        value = float(weight_kg)
+
+        existing = self._get_weight_items(date_str)
+        if any(float(i.get("value") or 0) == value for i in existing):
+            return {"status": "ok", "weight_kg": value, "date": date_str, "unchanged": True}
+        for item in existing:
+            self._delete_measurement(item.get("id"))
+
         endpoint = f"{self.BASE_URL}/measurements"
-        payload: dict[str, Any] = {"items": [{"type": "measurement", "date": date_str, "value": float(weight_kg), "unit": "kg", "measurement_type": "weight"}]}
+        payload: dict[str, Any] = {
+            "items": [{"type": "weight", "date": date_str, "value": value, "unit": "kilograms"}]
+        }
         response = self.session.post(endpoint, json=payload)
         response.raise_for_status()
-        return {"status": "ok", "weight_kg": weight_kg, "date": date_str}
+        if not (response.json().get("items") or []):
+            raise RuntimeError("MFP 未接受体重写入（返回 items 为空），请检查日期是否在未来。")
+        return {"status": "ok", "weight_kg": value, "date": date_str}
+
+    def _delete_measurement(self, entry_id: Any) -> bool:
+        """删除单条体征记录（``DELETE /v2/measurements/{数字id}`` → 204）。"""
+        if entry_id is None:
+            return False
+        response = self.session.delete(f"{self.BASE_URL}/measurements/{entry_id}")
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return response.status_code in (200, 204)
+
+    def delete_weight(self, date_str: str) -> list[float]:
+        """删除某日全部体重记录，返回被删除的数值列表（无记录则空列表）。"""
+        self._ensure_token_valid()
+        deleted: list[float] = []
+        for item in self._get_weight_items(date_str):
+            if self._delete_measurement(item.get("id")):
+                deleted.append(float(item.get("value") or 0))
+        return deleted
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def record_water(self, ml: int, date_str: str) -> dict[str, Any]:
@@ -2220,6 +2265,102 @@ def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None, a
     except Exception as exc:
         return f"删除失败: {exc}"
 
+
+@mcp.tool()
+def update_entry(item: FoodItemModel, date: str, entry_id: str | None = None, name: str | None = None) -> str:
+    """
+    Replace one diary entry with a new food item (delete + rewrite).
+    用一条新食物替换已有日记条目（删旧 + 重写；MFP 不支持原地修改）。
+
+    先用 get_diary_entries 查到 ID；name 支持精确匹配与唯一子串，
+    匹配到多条时返回候选、不修改。新条目默认沿用旧条目的餐次，
+    也可用 item.meal_type 指定。
+
+    Args:
+        item (FoodItemModel): New food item. | 新的食物条目。
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        entry_id (str, optional): Entry ID to replace. | 被替换的条目 ID。
+        name (str, optional): Food name (exact or unique substring). | 被替换的食物名。
+    """
+    try:
+        mfp = get_adapter()
+        meal_reverse = {
+            "Breakfast": "breakfast",
+            "Lunch": "lunch",
+            "Dinner": "dinner",
+            "Snacks": "snack",
+        }
+        if not entry_id and not name:
+            return "请提供 entry_id 或 name（可先用 get_diary_entries 查询）。"
+
+        entries = mfp.get_food_entries_from_html(date)
+        if not entries:
+            return f"{date} 没有找到可修改的饮食记录。"
+
+        target: dict[str, Any] | None = None
+        if entry_id:
+            target = next((e for e in entries if str(e.get("id")) == str(entry_id)), None)
+            if target is None:
+                return f"{date} 没有找到 id={entry_id} 的饮食记录。"
+        else:
+            needle = (name or "").strip().lower()
+            exact = [e for e in entries if (e.get("name") or "").strip().lower() == needle]
+            if len(exact) == 1:
+                target = exact[0]
+            elif len(exact) > 1:
+                listed = "；".join(f"{e.get('name')} (id={e.get('id')}, {e.get('meal')})" for e in exact)
+                return f"「{name}」匹配到多个记录：{listed}。请用 entry_id 指定。"
+            else:
+                contained = [e for e in entries if needle and needle in (e.get("name") or "").lower()]
+                if len(contained) == 1:
+                    target = contained[0]
+                elif len(contained) > 1:
+                    listed = "；".join(f"{e.get('name')} (id={e.get('id')}, {e.get('meal')})" for e in contained)
+                    return f"「{name}」匹配到多个记录：{listed}。请用 entry_id 指定。"
+                else:
+                    return f"{date} 没有名称匹配「{name}」的饮食记录。"
+
+        target_name = target.get("name") or "未知食物"
+        target_id = target.get("id")
+        if not target_id:
+            return f"「{target_name}」缺少 entry id，无法修改。"
+
+        if item.meal_type:
+            meal_key = item.meal_type.strip().lower()
+            if meal_key not in meal_reverse.values():
+                return f"未知餐次「{item.meal_type}」，可选：breakfast / lunch / dinner / snack。"
+        else:
+            meal_key = meal_reverse.get(target.get("meal") or "", "snack")
+
+        if not mfp.delete_diary_entry(str(target_id)):
+            return f"修改失败：无法删除旧条目「{target_name}」（可能已被移除）。"
+        mfp._remove_from_journal(date, target.get("meal") or "", target_name)
+
+        try:
+            result = mfp.record_nutrition(date, meal_key, [item.model_dump(exclude_none=True)])
+        except Exception as exc:
+            return (
+                f"旧条目已删除（原「{target_name}」），但写入新条目「{item.name}」失败：{exc}。"
+                f"请用 record_nutrition 重新录入「{item.name}」。"
+            )
+
+        note = ""
+        try:
+            after = mfp.get_food_entries_from_html(date)
+            # 名字会被配置/USDA 重写（甚至加品牌前缀），不能用名称比对；
+            # 删 1 写 1 后条目数不变，数量下降说明新条目没落库。
+            if len(after) < len(entries):
+                note = "（⚠️ 未能确认新条目已落库，请用 get_diary_entries 复查）"
+        except Exception as exc:
+            logger.warning("更新后回读失败，跳过确认: {}", exc)
+
+        warnings = (result or {}).get("warnings") or []
+        if warnings:
+            note += " " + "；".join(str(w) for w in warnings)
+        return f"已用「{item.name}」替换 {date} {target.get('meal')} 的「{target_name}」{note}。"
+    except Exception as exc:
+        return f"修改失败: {exc}"
+
 @mcp.tool()
 def health_check() -> str:
     """
@@ -2473,8 +2614,9 @@ def record_measurement(measurement_type: str, value: float, date: str) -> str:
         warnings = _date_warnings(date)
         suffix = ("\n\n" + "\n".join(warnings)) if warnings else ""
         if measurement_type.lower() == "weight":
-            mfp.record_weight(value, date)
-            return f"体重 {value}kg 记录成功 ({date})。{suffix}"
+            result = mfp.record_weight(value, date)
+            unchanged = "（数值未变，未重复写入）" if result.get("unchanged") else ""
+            return f"体重 {value}kg 记录成功 ({date})。{unchanged}{suffix}"
         elif measurement_type.lower() == "water":
             mfp.record_water(int(value), date)
             return f"成功记录饮水量: {int(value)}ml ({date})。{suffix}"
@@ -2482,6 +2624,41 @@ def record_measurement(measurement_type: str, value: float, date: str) -> str:
             return f"未知类型 '{measurement_type}'，请使用 'weight' 或 'water'。"
     except Exception as exc:
         return f"失败: {exc}"
+
+
+@mcp.tool()
+def delete_measurement(measurement_type: str, date: str) -> str:
+    """
+    Delete a day's body weight record, or clear a day's water intake.
+    删除某日体重记录，或清空某日饮水（record_measurement 的对称操作）。
+
+    体重的「改」也是删了重写：MFP 同日重复 POST 不会更新旧值。
+
+    Args:
+        measurement_type (str): 'weight' or 'water'. | 'weight'(体重) 或 'water'(饮水)。
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+    """
+    try:
+        mfp = get_adapter()
+        kind = measurement_type.strip().lower()
+        warnings = _date_warnings(date)
+        suffix = ("\n\n" + "\n".join(warnings)) if warnings else ""
+
+        if kind == "weight":
+            deleted = mfp.delete_weight(date)
+            if not deleted:
+                return f"{date} 没有体重记录，无需删除。{suffix}"
+            values = "、".join(f"{v:g}kg" for v in deleted)
+            return f"已删除 {date} 的体重记录：{values}。{suffix}"
+        if kind == "water":
+            before = mfp.get_water(date)
+            if before <= 0:
+                return f"{date} 的饮水本来就是 0，无需清空。{suffix}"
+            mfp.record_water(0, date)
+            return f"已清空 {date} 的饮水记录（原 {round(before)} ml）。{suffix}"
+        return f"未知类型「{measurement_type}」，请使用 weight 或 water。"
+    except Exception as exc:
+        return f"删除失败: {exc}"
 
 @mcp.tool()
 def lookup_food_nutrition(query: str) -> str:
