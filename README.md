@@ -55,7 +55,9 @@
 | `record_exercise` | 记录有氧/力量训练（按名称或 `exercise_id` 解析动作，热量缺失时按 MET×体重 估算） |
 | `search_exercise` | 检索 MFP 运动库，返回动作名 + `exercise_id`（区分不同配速/器械） |
 | `delete_exercise` | 按 `entry_id` 或名称删除已记录的运动 |
-| `record_measurement` | 记录体重 (kg) 或饮水 (ml) |
+| `record_measurement` | 记录体重 (kg) 或饮水 (ml)；同日体重会自动覆盖旧值 |
+| `delete_measurement` | 删除某日体重，或清空某日饮水（`record_measurement` 的对称操作） |
+| `update_entry` | 用新食物替换已有条目（删旧 + 重写，餐次默认沿用） |
 | `lookup_food_nutrition` | 查询本地 USDA 库的营养成分 |
 | `get_food_config` | 查看补剂与常驻食物配置 |
 | `import_cookies` | 导入浏览器导出的 Cookie JSON，即时恢复会话 |
@@ -118,7 +120,7 @@ Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
 **Step 3. 重启 Claude Desktop**
 
-完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 19 个工具即连接成功。
+完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 21 个工具即连接成功。
 
 ---
 
