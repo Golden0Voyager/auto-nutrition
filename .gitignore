@@ -20,6 +20,8 @@ __pycache__/
 .coverage
 usda_core.db-shm
 usda_core.db-wal
+# USDA 数据库由 scripts/usda_ingest.py 重建，不入库（54MB 可再生）
+usda_core.db
 
 # IDEs
 .vscode/
