@@ -824,3 +824,265 @@ class TestGetDiaryEntries:
             from mfp_adapter import get_diary_entries
             result = get_diary_entries("2026-10-23")
             assert "获取" in result and "失败" in result
+
+
+class TestGetGoals:
+    def test_reports_goals_and_source(self, mock_get_adapter):
+        mock_get_adapter.get_nutrition_goals.return_value = {
+            "energy": {"value": 2809.0}, "carbohydrates": 281.0, "fat": 93.0,
+            "protein": 211.0, "sodium": 2300, "sugar": 50, "_source": "web",
+        }
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_goals
+            result = get_goals("2026-10-23")
+            assert "2809" in result
+            assert "2300" in result
+            assert "web" in result
+
+    def test_missing_macro_renders_dash(self, mock_get_adapter):
+        mock_get_adapter.get_nutrition_goals.return_value = {
+            "energy": {"value": 2800.0}, "carbohydrates": 280.0, "fat": 93.0,
+            "protein": 210.0, "_source": "api",
+        }
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_goals
+            result = get_goals("2026-10-23")
+            assert "钠" in result
+            assert "—" in result
+
+    def test_exception_handling(self, mock_get_adapter):
+        mock_get_adapter.get_nutrition_goals.side_effect = Exception("boom")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_goals
+            result = get_goals("2026-10-23")
+            assert "失败" in result
+
+
+class TestDailySummaryCorrections:
+    def _goals(self):
+        return {"energy": {"value": 2809.0}, "protein": 211.0, "carbohydrates": 281.0,
+                "fat": 93.0, "sodium": 2300, "sugar": 50, "_source": "web"}
+
+    def test_warns_when_goals_fail(self, mock_get_adapter):
+        mock_get_adapter.get_diary_data.return_value = {"items": []}
+        mock_get_adapter.get_nutrition_goals.side_effect = Exception("boom")
+        mock_get_adapter.get_water.return_value = 0.0
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-01-01")
+            assert "默认值" in result
+
+    def test_counts_diary_meal_once(self, mock_get_adapter):
+        nc = {"energy": {"value": 300}, "protein": 10, "carbohydrates": 40, "fat": 5,
+              "sodium": 200, "sugar": 3}
+        mock_get_adapter.get_diary_data.return_value = {"items": [
+            {"type": "diary_meal", "diary_meal": "Breakfast", "nutritional_contents": nc},
+            {"type": "food_entry", "nutritional_contents": nc},
+        ]}
+        mock_get_adapter.get_nutrition_goals.return_value = self._goals()
+        mock_get_adapter.get_water.return_value = 0.0
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-01-01")
+            assert "- 300 (已吃)" in result
+
+    def test_shows_sodium_sugar_water_exercise_steps(self, mock_get_adapter):
+        mock_get_adapter.get_diary_data.return_value = {"items": [
+            {"type": "diary_meal", "nutritional_contents": {
+                "energy": {"value": 300}, "protein": 10, "carbohydrates": 40, "fat": 5,
+                "sodium": 628, "sugar": 4}},
+            {"type": "exercise_entry", "duration": 600, "energy": {"value": 120},
+             "exercise": {"description": "Running"}},
+            {"type": "steps_aggregate", "steps": 725, "energy": {"value": 9}},
+        ]}
+        mock_get_adapter.get_nutrition_goals.return_value = self._goals()
+        mock_get_adapter.get_water.return_value = 500.0
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-10-23")
+            assert "628" in result          # 钠已摄入
+            assert "饮水" in result and "500" in result
+            assert "Running" in result       # 运动明细
+            assert "725" in result           # 步数
+
+    def test_water_failure_does_not_break_summary(self, mock_get_adapter):
+        mock_get_adapter.get_diary_data.return_value = {"items": []}
+        mock_get_adapter.get_nutrition_goals.return_value = self._goals()
+        mock_get_adapter.get_water.side_effect = Exception("water API down")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-10-23")
+            assert "营养预算总结" in result
+
+
+class TestGetWater:
+    def test_returns_milliliters(self, adapter):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"item": {"date": "2026-10-23", "milliliters": 750.0}}
+        adapter.session.get.return_value = resp
+
+        assert adapter.get_water("2026-10-23") == 750.0
+
+    def test_missing_item_returns_zero(self, adapter):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {}
+        adapter.session.get.return_value = resp
+
+        assert adapter.get_water("2026-10-23") == 0.0
+
+
+DELETE_FIXTURE = [
+    {"id": "1001", "name": "Rolled Oats, 1 cup", "meal": "Breakfast",
+     "calories": 300, "protein": 10, "carbs": 54, "fat": 5},
+    {"id": "1002", "name": "Fried Egg, 1 egg", "meal": "Breakfast",
+     "calories": 102, "protein": 6, "carbs": 1, "fat": 8},
+    {"id": "2001", "name": "Chicken Breast, 200g", "meal": "Lunch",
+     "calories": 330, "protein": 62, "carbs": 0, "fat": 7},
+]
+
+
+class TestDeleteEntry:
+    def _call(self, mock_get_adapter, **kwargs):
+        mock_get_adapter.get_food_entries_from_html.return_value = DELETE_FIXTURE
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import delete_entry
+            return delete_entry("2026-10-23", **kwargs)
+
+    def test_delete_by_id(self, mock_get_adapter):
+        mock_get_adapter.delete_diary_entry.return_value = True
+        result = self._call(mock_get_adapter, entry_id="1002")
+        mock_get_adapter.delete_diary_entry.assert_called_once_with("1002")
+        assert "Fried Egg" in result
+
+    def test_delete_by_id_syncs_journal(self, mock_get_adapter):
+        mock_get_adapter.delete_diary_entry.return_value = True
+        self._call(mock_get_adapter, entry_id="1002")
+        mock_get_adapter._remove_from_journal.assert_called_once_with(
+            "2026-10-23", "Breakfast", "Fried Egg, 1 egg")
+
+    def test_delete_by_unique_name_substring(self, mock_get_adapter):
+        mock_get_adapter.delete_diary_entry.return_value = True
+        result = self._call(mock_get_adapter, name="oats")
+        mock_get_adapter.delete_diary_entry.assert_called_once_with("1001")
+        assert "Rolled Oats" in result
+
+    def test_ambiguous_name_lists_candidates_and_deletes_nothing(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = [
+            {"id": "1", "name": "Egg White", "meal": "Breakfast"},
+            {"id": "2", "name": "Egg Yolk", "meal": "Breakfast"},
+        ]
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import delete_entry
+            result = delete_entry("2026-10-23", name="egg")
+            assert "多个" in result
+            mock_get_adapter.delete_diary_entry.assert_not_called()
+
+    def test_missing_name_reports_and_deletes_nothing(self, mock_get_adapter):
+        result = self._call(mock_get_adapter, name="pizza")
+        assert "没有" in result
+        mock_get_adapter.delete_diary_entry.assert_not_called()
+
+    def test_requires_id_or_name(self, mock_get_adapter):
+        result = self._call(mock_get_adapter)
+        assert "entry_id" in result
+        mock_get_adapter.delete_diary_entry.assert_not_called()
+
+    def test_invalid_meal_type_rejected(self, mock_get_adapter):
+        result = self._call(mock_get_adapter, entry_id="1001", meal_type="brunch")
+        assert "brunch" in result
+
+    def test_failed_delete_reports(self, mock_get_adapter):
+        mock_get_adapter.delete_diary_entry.return_value = False
+        result = self._call(mock_get_adapter, entry_id="1001")
+        assert "失败" in result
+        mock_get_adapter._remove_from_journal.assert_not_called()
+
+
+class TestDiaryEntryIds:
+    def test_entries_expose_ids(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = DELETE_FIXTURE
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "1001" in result
+            assert "ID" in result
+
+
+class TestDeleteLastEntrySemantics:
+    def test_meal_type_deletes_exactly_count(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = DELETE_FIXTURE
+        mock_get_adapter.delete_diary_entry.return_value = True
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import delete_last_entry
+            delete_last_entry("2026-10-23", meal_type="breakfast")
+            assert mock_get_adapter.delete_diary_entry.call_count == 1
+
+    def test_all_in_meal_deletes_whole_meal(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = DELETE_FIXTURE
+        mock_get_adapter.delete_diary_entry.return_value = True
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import delete_last_entry
+            delete_last_entry("2026-10-23", meal_type="breakfast", all_in_meal=True)
+            assert mock_get_adapter.delete_diary_entry.call_count == 2
+
+    def test_delete_syncs_journal(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = DELETE_FIXTURE
+        mock_get_adapter.delete_diary_entry.return_value = True
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import delete_last_entry
+            delete_last_entry("2026-10-23", meal_type="lunch")
+            mock_get_adapter._remove_from_journal.assert_called_once_with(
+                "2026-10-23", "Lunch", "Chicken Breast, 200g")
+
+
+class TestHealthCheck:
+    def _prepare(self, mock_get_adapter):
+        mock_get_adapter._ensure_token_valid.return_value = True
+        mock_get_adapter._load_config.return_value = {
+            "supplements": {"a": {}}, "common_foods": {"b": {}},
+            "regional_foods": {}, "routines": {}, "meal_combos": {},
+        }
+        mock_get_adapter.usda.search.return_value = [{"name": "Oats"}]
+        mock_get_adapter.get_nutrition_goals.return_value = {
+            "energy": {"value": 2809.0}, "protein": 211.0, "_source": "api"}
+        mock_get_adapter.get_water.return_value = 0.0
+
+    def test_reports_every_check(self, mock_get_adapter):
+        self._prepare(mock_get_adapter)
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import health_check
+            result = health_check()
+            for expected in ("Cookie", "配置", "USDA", "目标", "饮水", "结论"):
+                assert expected in result
+
+    def test_all_green_conclusion(self, mock_get_adapter):
+        self._prepare(mock_get_adapter)
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import health_check
+            assert "全部正常" in health_check()
+
+    def test_token_failure_is_reported_not_raised(self, mock_get_adapter):
+        self._prepare(mock_get_adapter)
+        mock_get_adapter._ensure_token_valid.side_effect = Exception("expired")
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import health_check
+            result = health_check()
+            assert "❌" in result
+            assert "get_cookie_guide" in result
+
+    def test_usda_failure_is_degraded_but_not_blocking(self, mock_get_adapter):
+        self._prepare(mock_get_adapter)
+        mock_get_adapter.usda.search.return_value = []
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import health_check
+            result = health_check()
+            assert "⚠️" in result
