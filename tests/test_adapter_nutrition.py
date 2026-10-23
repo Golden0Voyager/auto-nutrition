@@ -283,6 +283,36 @@ class TestComboExpansion:
         result = adapter_with_config.record_nutrition("2026-01-01", "dinner", items)
         assert result["count"] == 1
 
+    def test_specific_routine_beats_generic_alias(self, adapter_with_config):
+        """「睡前补剂」必须展开成 night_stack，不能被先出现的泛化别名「补剂」抢走。"""
+        mock_create_food(adapter_with_config)
+        mock_post_diary(adapter_with_config)
+        adapter_with_config._config["meal_combos"] = {
+            "morning_stack": {
+                "name": "晨补",
+                "aliases": ["补剂"],
+                "items": [
+                    {"name": "Fish Oil", "calories": 10, "macros": {"carbs": 0, "protein": 0, "fat": 1.1}},
+                    {"name": "Vitamin B", "calories": 0, "macros": {"carbs": 0, "protein": 0, "fat": 0}},
+                ],
+            },
+        }
+        adapter_with_config._config["routines"] = {
+            "night_stack": {
+                "name": "晚补",
+                "aliases": ["睡前补剂"],
+                "items": [
+                    {"name": "ZMA", "calories": 4.8, "macros": {"carbs": 1.2, "protein": 0, "fat": 0}},
+                ],
+            },
+        }
+
+        items = [{"name": "睡前补剂"}]
+        result = adapter_with_config.record_nutrition("2026-01-01", "snack", items)
+
+        # 命中泛化别名会展开成 2 项（晨补），命中具体别名只展开 1 项（晚补）
+        assert result["count"] == 1
+
     def test_combo_with_ratio(self, adapter_with_config):
         mock_create_food(adapter_with_config)
         mock_post_diary(adapter_with_config)

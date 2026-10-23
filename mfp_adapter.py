@@ -879,27 +879,33 @@ class MFPAdapter:
         combos.update(conf_data.get("routines", {}))
 
         for raw_item in processed_items:
-            is_combo = False
             item_name_lower = raw_item["name"].lower()
+            # 取「命中别名最长」的包，而不是先出现的包：泛化别名（如「补剂」）
+            # 不能抢走更具体的「晚餐补剂」「睡前补剂」。
+            matched_combo: dict[str, Any] | None = None
+            matched_len = 0
             for combo_key, combo_conf in combos.items():
                 aliases = [combo_key.lower(), combo_conf.get("name", "").lower()] + [a.lower() for a in combo_conf.get("aliases", [])]
-                if any(alias in item_name_lower for alias in aliases if alias):
-                    logger.info("检测到组合/包匹配: {} -> 展开为 {} 项", raw_item["name"], len(combo_conf["items"]))
-                    ratio = float(raw_item.get("serving_ratio", 1.0))
-                    for c_item in combo_conf["items"]:
-                        new_item = c_item.copy()
-                        new_item["calories"] = round(new_item.get("calories", 0) * ratio, 1)
-                        if "macros" in new_item:
-                            new_item["macros"] = {k: round(v * ratio, 1) for k, v in new_item["macros"].items()}
-                        if "micros" in new_item:
-                            new_item.setdefault("macros", {})
-                            for mk, mv in new_item["micros"].items():
-                                new_item["macros"][mk] = round(mv * ratio, 1)
-                        expanded_items.append(new_item)
-                    is_combo = True
-                    break
-            if not is_combo:
+                for alias in aliases:
+                    if alias and alias in item_name_lower and len(alias) > matched_len:
+                        matched_combo, matched_len = combo_conf, len(alias)
+
+            if matched_combo is None:
                 expanded_items.append(raw_item)
+                continue
+
+            logger.info("检测到组合/包匹配: {} -> 展开为 {} 项", raw_item["name"], len(matched_combo["items"]))
+            ratio = float(raw_item.get("serving_ratio", 1.0))
+            for c_item in matched_combo["items"]:
+                new_item = c_item.copy()
+                new_item["calories"] = round(new_item.get("calories", 0) * ratio, 1)
+                if "macros" in new_item:
+                    new_item["macros"] = {k: round(v * ratio, 1) for k, v in new_item["macros"].items()}
+                if "micros" in new_item:
+                    new_item.setdefault("macros", {})
+                    for mk, mv in new_item["micros"].items():
+                        new_item["macros"][mk] = round(mv * ratio, 1)
+                expanded_items.append(new_item)
 
         results = []
         processed_items = []

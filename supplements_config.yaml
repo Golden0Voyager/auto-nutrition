@@ -335,20 +335,16 @@ routines:
       - { name: "锌镁片", calories: 4.8, macros: { carbs: 1.2, protein: 0, fat: 0 } }
     # 训练日 2 片 / 休息日 1 片；与晚餐钙片间隔 >3h
 
-  pre_workout_stack:
-    name: "运动表现包 (Pre-workout)"
-    aliases: ["运动前喝的", "甜菜根冲剂"]
+  workout_stack:
+    name: "训练日补剂 (Workout Stack)"
+    aliases: ["训练日补剂", "训练补剂", "训练日套餐", "训练套餐", "训练日补给", "workout", "workout stack"]
     items:
       - { name: "甜菜根粉", calories: 35, macros: { carbs: 8, protein: 1, fat: 0 }, micros: { sugar: 6, potassium: 250, fiber: 1.5, iron: 3 } }
-
-  post_workout_stack:
-    name: "肌肉恢复包 (Post-workout)"
-    aliases: ["运动后补充", "蛋白粉牛奶", "练后补剂"]
-    items:
       - { name: "Whey Protein", calories: 120, macros: { carbs: 3, protein: 24, fat: 1.5 }, micros: { calcium: 10, sodium: 100, cholesterol: 55 } }
       - { name: "Milk (Full Cream, 250ml)", calories: 150, macros: { carbs: 12, protein: 8, fat: 8 }, micros: { calcium: 25, potassium: 350, sodium: 100, vitamin_d: 12 } }
       - { name: "肌酸", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
-    # 训练日练后 30 分钟内；肌酸 3g 随练后碳水
+    # 一次调用记全 4 项：甜菜根仍在练前 2-2.5h，乳清/牛奶/肌酸在练后 30min。
+    # 一天只调一次；分两次记会重复记账。
 
 meal_combos:
   daily_standard_breakfast:
