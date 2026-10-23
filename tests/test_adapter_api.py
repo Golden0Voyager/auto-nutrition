@@ -34,10 +34,21 @@ class TestGetDiaryData:
 
 
 class TestRecordWeight:
+    """载荷按 2026-10-23 实测修正：type=weight、unit=kilograms（旧写法静默不落库）。"""
+
+    @staticmethod
+    def _stub(adapter, existing=None):
+        get_resp = MagicMock()
+        get_resp.raise_for_status = MagicMock()
+        get_resp.json.return_value = {"items": existing or []}
+        adapter.session.get.return_value = get_resp
+        post_resp = MagicMock()
+        post_resp.raise_for_status = MagicMock()
+        post_resp.json.return_value = {"items": [{"id": "1", "value": 1}]}
+        adapter.session.post.return_value = post_resp
+
     def test_success(self, adapter):
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        adapter.session.post.return_value = resp
+        self._stub(adapter)
 
         result = adapter.record_weight(75.5, "2026-01-01")
         assert result["status"] == "ok"
@@ -45,25 +56,21 @@ class TestRecordWeight:
         assert result["date"] == "2026-01-01"
 
     def test_posts_to_measurements(self, adapter):
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        adapter.session.post.return_value = resp
+        self._stub(adapter)
 
         adapter.record_weight(70.0, "2026-01-01")
         call_args = adapter.session.post.call_args
         assert "measurements" in call_args[0][0]
 
     def test_payload_structure(self, adapter):
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        adapter.session.post.return_value = resp
+        self._stub(adapter)
 
         adapter.record_weight(80.0, "2026-06-15")
         payload = adapter.session.post.call_args[1]["json"]
         assert payload["items"][0]["value"] == 80.0
-        assert payload["items"][0]["unit"] == "kg"
-        assert payload["items"][0]["measurement_type"] == "weight"
-
+        assert payload["items"][0]["unit"] == "kilograms"
+        assert payload["items"][0]["type"] == "weight"
+        assert "measurement_type" not in payload["items"][0]
 
 class TestRecordWater:
     def test_success(self, adapter):
