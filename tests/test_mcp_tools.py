@@ -343,9 +343,13 @@ class TestDeleteLastEntry:
 
 
 class TestRecordExercise:
+    """旧用例基于「无 exercise_id 也能写」的错误假设；真实行为见 tests/test_exercise.py。"""
+
     def test_cardio(self, mock_get_adapter):
-        mock_get_adapter._ensure_token_valid = MagicMock()
-        mock_get_adapter._post_diary_entry = MagicMock()
+        mock_get_adapter.search_exercises.return_value = [
+            {"id": "134028375027565", "description": "Running (jogging), 8.4 kph"},
+        ]
+        mock_get_adapter.record_exercise_entry.return_value = {"id": "x"}
 
         from mfp_adapter import ExerciseModel
         exercise = ExerciseModel(
@@ -362,8 +366,10 @@ class TestRecordExercise:
             assert "成功记录" in result
 
     def test_strength(self, mock_get_adapter):
-        mock_get_adapter._ensure_token_valid = MagicMock()
-        mock_get_adapter._post_diary_entry = MagicMock()
+        mock_get_adapter.search_exercises.return_value = [
+            {"id": "134028370832877", "description": "Bench Press, Barbell"},
+        ]
+        mock_get_adapter.record_exercise_entry.return_value = {"id": "x"}
 
         from mfp_adapter import ExerciseModel
         exercise = ExerciseModel(
@@ -381,7 +387,7 @@ class TestRecordExercise:
             assert "成功记录" in result
 
     def test_exception(self, mock_get_adapter):
-        mock_get_adapter._ensure_token_valid.side_effect = Exception("token expired")
+        mock_get_adapter.search_exercises.side_effect = Exception("token expired")
 
         from mfp_adapter import ExerciseModel
         exercise = ExerciseModel(name="Run", exercise_type="cardio", date="2026-01-01")
@@ -1145,10 +1151,15 @@ class TestWriteDateWarnings:
 
     def test_record_exercise_warns_on_future_date(self, mock_get_adapter, monkeypatch):
         self._freeze(monkeypatch)
+        mock_get_adapter.search_exercises.return_value = [
+            {"id": "134028375027565", "description": "Running (jogging), 8.4 kph"},
+        ]
+        mock_get_adapter.record_exercise_entry.return_value = {"id": "x"}
         with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
             from mfp_adapter import ExerciseModel, record_exercise
             result = record_exercise(ExerciseModel(
-                name="Running", exercise_type="cardio", date="2026-12-01", calories_burned=300))
+                name="Running", exercise_type="cardio", date="2026-12-01",
+                calories_burned=300, duration_min=30))
             assert "未来" in result
 
     def test_record_nutrition_warns_on_long_past(self, mock_get_adapter, monkeypatch):

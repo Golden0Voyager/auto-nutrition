@@ -52,7 +52,9 @@
 | `get_nutrition_trends` | 最近 N 天（≤30）趋势，含本地高保真微量元素 |
 | `delete_entry` | 按条目 ID 或食物名精确删除单条记录，并同步本地日志 |
 | `delete_last_entry` | 撤回最近 N 条（`count` 精确）或整餐删除（`all_in_meal`） |
-| `record_exercise` | 记录有氧/力量训练及消耗 |
+| `record_exercise` | 记录有氧/力量训练（按名称或 `exercise_id` 解析动作，热量缺失时按 MET×体重 估算） |
+| `search_exercise` | 检索 MFP 运动库，返回动作名 + `exercise_id`（区分不同配速/器械） |
+| `delete_exercise` | 按 `entry_id` 或名称删除已记录的运动 |
 | `record_measurement` | 记录体重 (kg) 或饮水 (ml) |
 | `lookup_food_nutrition` | 查询本地 USDA 库的营养成分 |
 | `get_food_config` | 查看补剂与常驻食物配置 |
@@ -116,7 +118,7 @@ Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
 **Step 3. 重启 Claude Desktop**
 
-完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 17 个工具即连接成功。
+完全退出（Command+Q）并重启。点开 🔨 工具图标，看到 `record_nutrition`、`get_daily_summary`、`get_current_time` 等 19 个工具即连接成功。
 
 ---
 
