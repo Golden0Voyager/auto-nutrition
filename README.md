@@ -145,6 +145,16 @@ Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
 5. 代码检查：`uv run ruff check mfp_adapter.py tests/`
 
+6. （可选）构建本地 USDA 营养库：
+
+   ```bash
+   uv run python scripts/usda_ingest.py
+   ```
+
+   下载 USDA Foundation + SR Legacy 原始 CSV 并生成 `usda_core.db`（约 54MB，需联网，几分钟）。
+   该文件不进仓库；不构建也能正常使用，只是 Level 2 的 USDA 精准检索会被跳过，
+   营养值回退到本地配置 / AI 估算。
+
 ---
 
 *免责声明：本项目纯属个人自用折腾与自动化探索，与 MyFitnessPal 官方无任何关联。请合理使用 API 频次，避免触发官方风控系统。*
