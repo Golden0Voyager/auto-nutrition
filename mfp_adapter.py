@@ -1042,7 +1042,11 @@ class MFPAdapter:
                 events.append(("meal", m.start(), meal))
 
         for m in re.finditer(r'data-food-entry-id="(\d+)"[^>]*>([^<]+)', text):
-            events.append(("entry", m.start(), (m.group(1), m.group(2).strip())))
+            row_end = text.find("</tr>", m.end())
+            row_tail = text[m.end():row_end] if row_end != -1 else ""
+            entry_data = {"id": m.group(1), "name": m.group(2).strip()}
+            entry_data.update(self._parse_row_nutrition(row_tail))
+            events.append(("entry", m.start(), entry_data))
 
         events.sort(key=lambda x: x[1])
 
@@ -1052,9 +1056,25 @@ class MFPAdapter:
             if evt_type == "meal":
                 current_meal = data
             else:
-                eid, name = data
-                entries.append({"id": eid, "name": name, "meal": current_meal})
+                entries.append({**data, "meal": current_meal})
         return entries
+
+    @staticmethod
+    def _parse_row_nutrition(row_html: str) -> dict[str, float]:
+        """
+        解析日记行尾部的营养单元格。
+
+        网页日记列顺序固定为 Calories / Carbs / Fat / Protein / Sodium / Sugar，
+        缺失的列按 0 处理（如 Quick Added Calories 只有热量）。
+        """
+        columns = ("calories", "carbs", "fat", "protein", "sodium", "sugar")
+        values: list[float] = []
+        for cell in re.findall(r"<td[^>]*>(.*?)</td>", row_html, re.DOTALL):
+            text = re.sub(r"<[^>]+>", " ", cell)
+            match = re.search(r"\d[\d,]*(?:\.\d+)?", text)
+            if match:
+                values.append(float(match.group(0).replace(",", "")))
+        return {column: (values[i] if i < len(values) else 0.0) for i, column in enumerate(columns)}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def delete_diary_entry(self, entry_id: str) -> bool:
@@ -1359,6 +1379,99 @@ def get_daily_summary(date: str) -> str:
     except Exception as exc:
         return f"获取总结失败: {exc}"
 
+
+
+@mcp.tool()
+def get_diary_entries(date: str, meal_type: str | None = None) -> str:
+    """
+    List individual food entries (with calories and macros) for a date, grouped by meal.
+    按餐次列出指定日期的逐条饮食明细（含热量与宏量营养素）。
+
+    数据来自网页版日记：v2 API 只返回每餐聚合值，逐条记录需解析 HTML。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        meal_type (str, optional): breakfast, lunch, dinner, or snack. Omit for all meals.
+            | 餐次，留空则返回当天所有餐次。
+    """
+    try:
+        mfp = get_adapter()
+        meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
+
+        target_meal: str | None = None
+        if meal_type:
+            target_meal = meal_map.get(meal_type.strip().lower())
+            if not target_meal:
+                return f"未知餐次「{meal_type}」，可选：breakfast / lunch / dinner / snack。"
+
+        entries = mfp.get_food_entries_from_html(date)
+        if target_meal:
+            entries = [e for e in entries if e.get("meal") == target_meal]
+
+        if not entries:
+            if meal_type:
+                return f"{date} 的 {meal_type} 没有饮食记录。"
+            return f"{date} 没有找到饮食记录。"
+
+        meal_order = ["Breakfast", "Lunch", "Dinner", "Snacks", "未分类"]
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for entry in entries:
+            grouped.setdefault(entry.get("meal") or "未分类", []).append(entry)
+
+        def calories(entry: dict[str, Any]) -> float:
+            return float(entry.get("calories") or 0)
+
+        def macro(entry: dict[str, Any], key: str) -> float:
+            return float(entry.get(key) or 0)
+
+        def cal_text(value: float) -> str:
+            return str(int(round(value)))
+
+        def macro_text(value: float) -> str:
+            return f"{round(value, 1)}"
+
+        sections = [f"### 🍽️ {date} 饮食明细"]
+        day_totals = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+
+        for meal in meal_order:
+            items = grouped.get(meal)
+            if not items:
+                continue
+            totals = {
+                "calories": sum(calories(i) for i in items),
+                "protein": sum(macro(i, "protein") for i in items),
+                "carbs": sum(macro(i, "carbs") for i in items),
+                "fat": sum(macro(i, "fat") for i in items),
+            }
+            for key, value in totals.items():
+                day_totals[key] += value
+
+            rows = [
+                "| 食物 | 热量 | 蛋白 | 碳水 | 脂肪 |",
+                "| --- | ---: | ---: | ---: | ---: |",
+            ]
+            rows.extend(
+                f"| {i.get('name', '未知食物')} | {cal_text(calories(i))} | "
+                f"{macro_text(macro(i, 'protein'))} | {macro_text(macro(i, 'carbs'))} | "
+                f"{macro_text(macro(i, 'fat'))} |"
+                for i in items
+            )
+            rows.append(
+                f"| **小计** | **{cal_text(totals['calories'])}** | **{macro_text(totals['protein'])}** | "
+                f"**{macro_text(totals['carbs'])}** | **{macro_text(totals['fat'])}** |"
+            )
+            sections.append(f"**{meal}** ({len(items)} 项)\n" + "\n".join(rows))
+
+        total_label = f"{target_meal} 合计" if target_meal else "全天合计"
+        sections.append(
+            f"**{total_label}** — {cal_text(day_totals['calories'])} kcal · "
+            f"P {macro_text(day_totals['protein'])} / "
+            f"C {macro_text(day_totals['carbs'])} / "
+            f"F {macro_text(day_totals['fat'])}"
+        )
+        return "\n\n".join(sections)
+    except Exception as exc:
+        return f"获取饮食明细失败: {exc}"
 
 
 @mcp.tool()

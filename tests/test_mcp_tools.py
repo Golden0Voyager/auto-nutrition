@@ -729,3 +729,98 @@ class TestRecordNutritionTimeWarning:
                 from mfp_adapter import record_nutrition
                 result = record_nutrition("2026-01-01", "dinner", [{"name": "Food", "calories": 100}])
                 assert "提示" in result
+
+
+ENTRIES_FIXTURE = [
+    {"id": "1001", "name": "Rolled Oats, 1 cup", "meal": "Breakfast",
+     "calories": 300, "protein": 10, "carbs": 54, "fat": 5, "sodium": 0, "sugar": 0},
+    {"id": "1002", "name": "Fried Egg, 1 egg", "meal": "Breakfast",
+     "calories": 102, "protein": 6, "carbs": 1, "fat": 8, "sodium": 136, "sugar": 0},
+    {"id": "2001", "name": "Chicken Breast, 200g", "meal": "Lunch",
+     "calories": 330, "protein": 62, "carbs": 0, "fat": 7, "sodium": 148, "sugar": 0},
+]
+
+
+class TestGetDiaryEntries:
+    def test_lists_each_food_item(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = ENTRIES_FIXTURE
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "Rolled Oats, 1 cup" in result
+            assert "Chicken Breast, 200g" in result
+
+    def test_groups_by_meal_with_subtotals(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = ENTRIES_FIXTURE
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "Breakfast" in result
+            assert "Lunch" in result
+            assert "小计" in result
+            # 早餐小计 300+102=402，午餐 330
+            assert "402" in result
+            assert "330" in result
+
+    def test_day_total(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = ENTRIES_FIXTURE
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "全天合计" in result
+            assert "732" in result
+
+    def test_meal_type_filter(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = ENTRIES_FIXTURE
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23", "breakfast")
+            assert "Rolled Oats, 1 cup" in result
+            assert "Chicken Breast, 200g" not in result
+            assert "402" in result
+
+    def test_snack_maps_to_snacks(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = [
+            {"id": "4001", "name": "Protein Bar", "meal": "Snacks",
+             "calories": 200, "protein": 20, "carbs": 20, "fat": 5},
+        ]
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23", "snack")
+            assert "Protein Bar" in result
+
+    def test_invalid_meal_type_rejected(self, mock_get_adapter):
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23", "brunch")
+            assert "brunch" in result
+            assert "breakfast" in result.lower()
+
+    def test_empty_meal_reports_nothing_recorded(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = []
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23", "dinner")
+            assert "没有" in result
+
+    def test_empty_day_reports_nothing_recorded(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.return_value = []
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "没有" in result
+
+    def test_exception_handling(self, mock_get_adapter):
+        mock_get_adapter.get_food_entries_from_html.side_effect = Exception("network error")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_diary_entries
+            result = get_diary_entries("2026-10-23")
+            assert "获取" in result and "失败" in result
