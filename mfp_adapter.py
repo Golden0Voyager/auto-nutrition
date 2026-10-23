@@ -60,6 +60,10 @@ class ExerciseModel(BaseModel):
     name: str = Field(..., description="Exercise name (e.g., 'Running') | 运动名称（如：跑步）")
     exercise_type: str = Field(..., description="'cardio' or 'strength' | 'cardio'(有氧) 或 'strength'(力量)")
     date: str = Field(..., description="Date (YYYY-MM-DD) | 日期")
+    exercise_id: str | None = Field(
+        None,
+        description="MyFitnessPal exercise id from search_exercise; omit to resolve by name | MFP 运动库 id（可选，省略则按名称检索）",
+    )
     calories_burned: float | None = Field(None, description="Estimated calories burned | 预估消耗热量")
     duration_min: float | None = Field(None, description="Duration in minutes | 运动时长（分钟）")
     sets: int | None = Field(None, description="Number of sets | 组数")
@@ -574,6 +578,104 @@ class MFPAdapter:
         response = self.session.post(endpoint, json=payload)
         response.raise_for_status()
         return {"status": "ok", "ml": ml, "date": date_str}
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
+    def search_exercises(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """检索 MFP 运动库，返回 ``[{id, description}]``。
+
+        真实端点：``GET /v2/exercises/search?search=<q>``（2026-10-23 实测 200）。
+        详情端点 ``/v2/exercises/{id}`` 未授权（401），拿不到官方 METs，
+        因此热量需由调用方给出或本地估算。
+        """
+        self._ensure_token_valid()
+        response = self.session.get(
+            f"{self.BASE_URL}/exercises/search",
+            params={"search": query},
+            headers={"Accept": "application/json"},
+        )
+        response.raise_for_status()
+        exercises = response.json().get("exercises") or []
+        return [e for e in exercises if e.get("id")][:limit]
+
+    def get_latest_weight(self) -> float | None:
+        """最近一次体重（kg）；无记录或字段异常时返回 None。"""
+        self._ensure_token_valid()
+        response = self.session.get(f"{self.BASE_URL}/measurements", params={"type": "weight"})
+        response.raise_for_status()
+        items = response.json().get("items") or []
+        if not items:
+            return None
+        value = items[0].get("value")
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
+    def record_exercise_entry(
+        self,
+        date_str: str,
+        exercise_id: str,
+        *,
+        duration_min: float,
+        calories: float,
+        sets: int | None = None,
+        reps: int | None = None,
+        weight_kg: float | None = None,
+        start_time: str | None = None,
+    ) -> dict[str, Any]:
+        """写入一条运动记录。
+
+        真实 schema（2026-10-23 实测 201，缺任一项都会 400）：
+
+        - ``exercise: {id}``：v2 运动库 id（来自 :meth:`search_exercises`）
+        - ``duration``：**秒**，且需 ≥ 60（30 秒会被判 Quantity invalid）
+        - ``energy``：``{value, unit}``，不能用 ``energy_burned``
+        - ``start_time``：``YYYY-MM-DDTHH:MM:SS``，缺失会被拒
+        - 力量动作额外：``sets`` / ``reps_per_set`` / ``weight_per_set``（MFP 只存磅）
+        """
+        entry: dict[str, Any] = {
+            "type": "exercise_entry",
+            "date": date_str,
+            "exercise": {"id": str(exercise_id)},
+            "client_id": "mfp-main-js",
+            "duration": max(60, int(round(float(duration_min) * 60))),
+            "energy": {"value": float(calories), "unit": "calories"},
+            "start_time": start_time or f"{date_str}T12:00:00",
+        }
+        if sets and reps:
+            entry["sets"] = int(sets)
+            entry["reps_per_set"] = int(reps)
+            if weight_kg:
+                entry["weight_per_set"] = {
+                    "value": round(float(weight_kg) * 2.20462, 1),
+                    "unit": "pounds",
+                }
+
+        def _exercise_count() -> int:
+            items = self.get_diary_data(date_str).get("items", [])
+            return sum(1 for i in items if i.get("type") == "exercise_entry")
+
+        try:
+            before = _exercise_count()
+        except Exception as exc:
+            logger.warning("读取运动基线失败，写入后将跳过防双写校验: {}", exc)
+            before = None
+
+        self._post_diary_entry(
+            entry,
+            verify=(lambda: before is not None and _exercise_count() > before) if before is not None else None,
+        )
+        return {**entry, "duration_min": duration_min}
+
+    def delete_exercise_entry(self, entry_id: str) -> bool:
+        """删除一条运动记录（``DELETE /v2/diary/{uuid}`` → 204）。"""
+        self._ensure_token_valid()
+        response = self.session.delete(f"{self.BASE_URL}/diary/{entry_id}")
+        if response.status_code == 404:
+            return False
+        response.raise_for_status()
+        return response.status_code in (200, 204)
 
     def _apply_config_safeguard(self, item: dict[str, Any]) -> dict[str, Any]:
         conf_data = self._load_config()
@@ -1297,6 +1399,48 @@ def get_adapter():
     if adapter is None:
         adapter = MFPAdapter()
     return adapter
+
+# 关键词 → MET（代谢当量）。v2 运动详情端点未授权，拿不到官方 METs，只能本地估算。
+_EXERCISE_METS: tuple[tuple[tuple[str, ...], float], ...] = (
+    (("run", "jog", "跑步", "慢跑"), 9.8),
+    (("walk", "hike", "走", "徒步"), 3.8),
+    (("cycl", "bike", "bicycl", "spin", "骑"), 7.5),
+    (("swim", "游泳"), 8.0),
+    (("row", "划船"), 7.0),
+    (("hiit", "crossfit", "circuit", "tabata"), 8.0),
+    (("jump", "rope", "跳绳"), 10.0),
+    (("yoga", "pilates", "stretch", "瑜伽"), 2.8),
+    (("elliptical", "stair", "climb", "爬"), 7.0),
+    (("dance", "zumba", "舞"), 6.0),
+    (
+        (
+            "bench", "press", "squat", "deadlift", "lift", "weight", "strength",
+            "curl", "row", "力量", "深蹲", "卧推", "硬拉",
+        ),
+        5.0,
+    ),
+)
+
+
+def _estimate_calories(name: str, duration_min: float, weight_kg: float) -> float:
+    """按动作关键词查 MET 估算热量：``kcal = MET × 体重(kg) × 小时``。
+
+    仅在没有官方 METs、用户又没给热量时使用；调用方必须在输出里标注「估算」。
+    """
+    lowered = (name or "").lower()
+    met = 5.0
+    for keywords, value in _EXERCISE_METS:
+        if any(k in lowered for k in keywords):
+            met = value
+            break
+    return round(met * float(weight_kg) * (float(duration_min) / 60.0), 1)
+
+
+def _exercise_description(item: dict[str, Any]) -> str:
+    """从 v2 运动条目里取动作名，兼容历史字段 exercise_name。"""
+    exercise = item.get("exercise") or {}
+    return str(exercise.get("description") or item.get("exercise_name") or "未命名运动")
+
 
 def _date_warnings(date_str: str) -> list[str]:
     """日期合理性提示：格式错误 / 未来预录 / 长期补录。四个写工具共用。"""
@@ -2148,61 +2292,170 @@ def health_check() -> str:
 
 
 @mcp.tool()
+def search_exercise(query: str) -> str:
+    """
+    Search MyFitnessPal's exercise catalog and return exercise_id values.
+    检索 MyFitnessPal 运动库，返回可用的 exercise_id。
+
+    MFP 的动作名区分配速/器械（Running 就有 8.4/9.6/10.7 kph 等多个条目），
+    名称有歧义时先用本工具查到 id，再把 id 传给 record_exercise。
+
+    Args:
+        query (str): English search term (e.g., 'running', 'bench press'). | 英文检索词。
+    """
+    try:
+        mfp = get_adapter()
+        matches = mfp.search_exercises(query)
+        if not matches:
+            return (
+                f"没有找到匹配「{query}」的运动动作。"
+                "换个英文关键词试试（如 running / cycling / bench press / yoga）。"
+            )
+        lines = ["| 动作 | exercise_id |", "| --- | --- |"]
+        lines += [f"| {m.get('description', '')} | {m.get('id', '')} |" for m in matches]
+        return f"### 🔍 运动库匹配「{query}」\n\n" + "\n".join(lines)
+    except Exception as exc:
+        return f"搜索运动失败: {exc}"
+
+
+@mcp.tool()
 def record_exercise(exercise: ExerciseModel) -> str:
     """
     Record cardiovascular or strength exercises to MyFitnessPal.
     记录有氧运动或力量训练到 MyFitnessPal。
+
+    动作解析：给了 exercise_id 就直接用；否则按名称在 MFP 运动库检索，
+    命中多个时取第一个并在输出里说明实际写入的动作名。
+    热量没给时按 MET × 体重估算，输出会标注「估算」。
+    力量训练需要 sets + reps；weight_kg 按公斤传入，写入时换算成磅。
 
     Args:
         exercise (ExerciseModel): Exercise data model. | 运动数据模型。
     """
     try:
         mfp = get_adapter()
-        mfp._ensure_token_valid()
+        is_strength = exercise.exercise_type.lower() == "strength"
 
-        diary_entry: dict[str, Any] = {
-            "type": "exercise_entry",
-            "date": exercise.date,
-            "exercise_name": exercise.name,
-            "client_id": "mfp-main-js"
-        }
+        matched_name = exercise.name
+        exercise_id = exercise.exercise_id
+        if not exercise_id:
+            matches = mfp.search_exercises(exercise.name)
+            if not matches:
+                return (
+                    f"没找到名为「{exercise.name}」的运动动作。"
+                    "请先调用 search_exercise 查询英文名称，再把返回的 exercise_id 传进来。"
+                )
+            exact = next(
+                (
+                    m
+                    for m in matches
+                    if (m.get("description") or "").strip().lower() == exercise.name.strip().lower()
+                ),
+                None,
+            )
+            chosen = exact or matches[0]
+            exercise_id = chosen.get("id")
+            matched_name = chosen.get("description") or exercise.name
 
-        if exercise.exercise_type.lower() == "cardio":
-            diary_entry["exercise_type"] = "cardiovascular"
-            if exercise.calories_burned:
-                diary_entry["energy_burned"] = {"value": exercise.calories_burned, "unit": "calories"}
-            if exercise.duration_min:
-                diary_entry["duration"] = int(exercise.duration_min * 60) # 秒
+        if is_strength:
+            if not exercise.sets or not exercise.reps:
+                return "力量训练需要提供 sets（组数）和 reps（每组次数）。"
+            # MFP 力量条目以组数/次数为主，duration 仅用于热量估算：
+            # 每组按 3 分钟计（含组间休息），给出更接近真实训练量的估算。
+            duration_min = exercise.duration_min or max(1.0, exercise.sets * 3.0)
         else:
-            diary_entry["exercise_type"] = "strength"
-            if exercise.sets:
-                diary_entry["sets"] = exercise.sets
-            if exercise.reps:
-                diary_entry["repetitions"] = exercise.reps
-            if exercise.weight_kg:
-                diary_entry["weight_per_set"] = {"value": exercise.weight_kg, "unit": "kilograms"}
+            if not exercise.duration_min:
+                return "有氧运动需要提供 duration_min（时长，分钟）。"
+            duration_min = exercise.duration_min
 
-        def _exercise_count() -> int:
-            items = mfp.get_diary_data(exercise.date).get("items", [])
-            return sum(1 for i in items if i.get("type") == "exercise_entry")
+        calories = exercise.calories_burned
+        estimate_note = ""
+        if not calories:
+            weight = 70.0
+            try:
+                latest = mfp.get_latest_weight()
+                if latest:
+                    weight = float(latest)
+            except Exception as exc:
+                logger.debug("读取体重失败，估算热量回退 70kg: {}", exc)
+            calories = _estimate_calories(matched_name, duration_min, weight)
+            estimate_note = f"，按 {weight:g}kg 估算"
 
-        try:
-            exercise_before = _exercise_count()
-        except Exception as exc:
-            logger.warning("读取运动基线失败，跳过防双写校验: {}", exc)
-            exercise_before = None
-
-        mfp._post_diary_entry(
-            diary_entry,
-            verify=lambda: exercise_before is not None and _exercise_count() > exercise_before,
+        mfp.record_exercise_entry(
+            date_str=exercise.date,
+            exercise_id=exercise_id,
+            duration_min=duration_min,
+            calories=calories,
+            sets=exercise.sets if is_strength else None,
+            reps=exercise.reps if is_strength else None,
+            weight_kg=exercise.weight_kg if is_strength else None,
         )
 
-        type_cn = "有氧" if exercise.exercise_type.lower() == "cardio" else "力量"
-        output = f"成功记录{type_cn}运动: {exercise.name} ({exercise.date})。"
+        type_cn = "力量" if is_strength else "有氧"
+        if is_strength:
+            detail = f"{exercise.sets} 组 × {exercise.reps} 次"
+            if exercise.weight_kg:
+                detail += f"，{exercise.weight_kg}kg"
+        else:
+            detail = f"{duration_min:g} 分钟"
+        output = (
+            f"成功记录{type_cn}运动：{matched_name}"
+            f"（{exercise.date}，{detail}，约 {round(calories)} kcal{estimate_note}）。"
+        )
         warnings = _date_warnings(exercise.date)
         return output + ("\n\n" + "\n".join(warnings) if warnings else "")
     except Exception as exc:
         return f"记录运动失败: {exc}"
+
+
+@mcp.tool()
+def delete_exercise(date: str, entry_id: str | None = None, name: str | None = None) -> str:
+    """
+    Delete a logged exercise entry from MyFitnessPal.
+    删除 MyFitnessPal 里已记录的运动（按 entry_id 或名称）。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        entry_id (str | None): Exercise entry id from get_diary_entries. | 运动条目 id。
+        name (str | None): Exercise name, partial match allowed. | 运动名称（支持部分匹配）。
+    """
+    try:
+        if not entry_id and not name:
+            return "请提供 entry_id 或 name 来指定要删除的运动记录。"
+        mfp = get_adapter()
+        items = [
+            i
+            for i in mfp.get_diary_data(date).get("items", [])
+            if i.get("type") == "exercise_entry"
+        ]
+        if not items:
+            return f"{date} 没有运动记录。"
+
+        if entry_id:
+            target = next((i for i in items if i.get("id") == entry_id), None)
+            if target is None:
+                return f"{date} 没有找到 id 为「{entry_id}」的运动记录。"
+        else:
+            needle = (name or "").strip().lower()
+            matches = [i for i in items if needle in _exercise_description(i).lower()]
+            if not matches:
+                return f"{date} 没有找到名称包含「{name}」的运动记录。"
+            if len(matches) > 1:
+                listing = "\n".join(
+                    f"- {_exercise_description(i)}（id: {i.get('id')}）" for i in matches
+                )
+                return f"「{name}」匹配到多个运动记录，请改用 entry_id 指定：\n{listing}"
+            target = matches[0]
+
+        if not mfp.delete_exercise_entry(target.get("id")):
+            return f"删除失败：{date} 没有找到该运动记录（可能已被删除）。"
+        warnings = _date_warnings(date)
+        return (
+            f"已删除 {date} 的运动记录：{_exercise_description(target)}。"
+            + ("\n\n" + "\n".join(warnings) if warnings else "")
+        )
+    except Exception as exc:
+        return f"删除运动失败: {exc}"
 
 @mcp.tool()
 def record_measurement(measurement_type: str, value: float, date: str) -> str:
