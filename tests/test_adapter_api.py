@@ -204,3 +204,32 @@ class TestPostDiaryEntry:
         payload = adapter.session.post.call_args[1]["json"]
         assert "items" in payload
         assert payload["items"][0] == entry
+
+
+class TestGoalsSourceAndSodium:
+    def test_web_goal_row_includes_sodium_and_sugar(self, adapter):
+        api_resp = MagicMock()
+        api_resp.raise_for_status.side_effect = requests.exceptions.HTTPError(
+            "404 Client Error", response=MagicMock(status_code=404)
+        )
+        web_resp = MagicMock()
+        web_resp.raise_for_status = MagicMock()
+        web_resp.text = (
+            '<tr><td>Your Daily Goal </td><td>2,809</td><td>281</td>'
+            "<td>93</td><td>211</td><td>2,300</td><td>50</td></tr>"
+        )
+        adapter.session.get.side_effect = [api_resp, web_resp]
+
+        goals = adapter.get_nutrition_goals("2026-01-01")
+        assert goals["sodium"] == 2300
+        assert goals["sugar"] == 50
+        assert goals["_source"] == "web"
+
+    def test_api_goals_are_tagged_as_api(self, adapter):
+        resp = MagicMock()
+        resp.json.return_value = {"items": [{"energy": {"value": 2500}, "protein": 200}]}
+        resp.raise_for_status = MagicMock()
+        adapter.session.get.return_value = resp
+
+        goals = adapter.get_nutrition_goals("2026-01-01")
+        assert goals["_source"] == "api"

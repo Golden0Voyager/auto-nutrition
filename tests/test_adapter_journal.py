@@ -137,3 +137,29 @@ class TestLogToLocalJournal:
         with patch("mfp_adapter.os.replace", side_effect=mock_replace):
             items = [{"name": "Apple", "calories": 95}]
             adapter._log_to_local_journal("2026-01-01", "Snack", items)
+
+
+class TestRemoveFromJournal:
+    def test_removes_matching_item(self, adapter):
+        adapter._log_to_local_journal("2026-10-23", "Breakfast", [{"name": "Oats", "calories": 300}])
+        removed = adapter._remove_from_journal("2026-10-23", "Breakfast", "Oats")
+        assert removed == 1
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            assert json.load(f) == []
+
+    def test_keeps_other_items_in_same_meal(self, adapter):
+        adapter._log_to_local_journal(
+            "2026-10-23", "Breakfast",
+            [{"name": "Oats", "calories": 300}, {"name": "Egg", "calories": 100}],
+        )
+        assert adapter._remove_from_journal("2026-10-23", "Breakfast", "Oats") == 1
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert [i["name"] for i in journal[0]["items"]] == ["Egg"]
+
+    def test_returns_zero_when_no_match(self, adapter):
+        adapter._log_to_local_journal("2026-10-23", "Breakfast", [{"name": "Oats", "calories": 300}])
+        assert adapter._remove_from_journal("2026-10-23", "Lunch", "Oats") == 0
+
+    def test_missing_journal_file_returns_zero(self, adapter):
+        assert adapter._remove_from_journal("2026-10-23", "Breakfast", "Oats") == 0
