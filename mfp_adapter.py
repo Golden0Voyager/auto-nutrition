@@ -6,7 +6,9 @@ import sqlite3
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -754,6 +756,24 @@ class MFPAdapter:
 
         results = []
         processed_items = []
+        written_items: list[dict[str, Any]] = []
+        # 写入前基线：仅用于 5xx/超时后判断「是否已落库」，避免重试造成双计
+        diary_snapshot = self._diary_entries_snapshot(date_str)
+
+        def _verify_written(item_name: str) -> bool:
+            if diary_snapshot is None:
+                return False
+            before = sum(1 for meal, name in diary_snapshot if meal == meal_name and item_name in name)
+            try:
+                current = self.get_food_entries_from_html(date_str)
+            except Exception:
+                return False
+            after = sum(
+                1 for e in current
+                if (e.get("meal") or "") == meal_name and item_name in (e.get("name") or "")
+            )
+            return after > before
+
         for raw_item in expanded_items:
             # 提取 AI 暂存值
             ai_calories = raw_item.pop("ai_calories", None)
@@ -812,7 +832,10 @@ class MFPAdapter:
                     "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
                     "client_id": "mfp-main-js"
                 }
-                self._post_diary_entry(diary_entry)
+                self._post_diary_entry(diary_entry, verify=partial(_verify_written, item["name"]))
+                if diary_snapshot is not None:
+                    diary_snapshot.append((meal_name, item["name"]))
+                written_items.append(item)
                 results.append({"name": item["name"], "calories": item["calories"], "unmatched": item.get("_unmatched", False), "status": "ok"})
                 logger.info('成功录入: "{name}" ({cal} kcal)', name=item["name"], cal=item["calories"])
             except requests.exceptions.HTTPError as he:
@@ -823,8 +846,8 @@ class MFPAdapter:
                 logger.error('录入 "{name}" 失败: {error}', name=item["name"], error=e)
                 results.append({"name": item["name"], "calories": item["calories"], "unmatched": item.get("_unmatched", False), "status": "error", "error": str(e)})
 
-        # --- 本地高保真日志记录 ---
-        self._log_to_local_journal(date_str, meal_name, processed_items)
+        # --- 本地高保真日志记录：只记真正写进 MFP 的条目，失败项不能污染趋势 ---
+        self._log_to_local_journal(date_str, meal_name, written_items)
 
         unmatched = [r["name"] for r in results if r.get("unmatched")]
         result = {"status": "ok", "count": len(results)}
@@ -1224,11 +1247,47 @@ class MFPAdapter:
         goal_item["_source"] = "api"
         return goal_item
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def _post_diary_entry(self, diary_entry: dict[str, Any]) -> None:
-        """带重试的日记条目写入，供 record_nutrition 和 record_exercise 共用。"""
-        response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
-        response.raise_for_status()
+    def _diary_entries_snapshot(self, date_str: str) -> list[tuple[str, str]] | None:
+        """写入前的日记基线（餐次 + 条目名），用于失败时判断是否已经落库。"""
+        try:
+            entries = self.get_food_entries_from_html(date_str)
+        except Exception as exc:
+            logger.warning("读取日记基线失败，写入后将跳过防双写校验: {}", exc)
+            return None
+        return [(e.get("meal") or "", e.get("name") or "") for e in entries]
+
+    def _post_diary_entry(self, diary_entry: dict[str, Any], verify: Callable[[], bool] | None = None) -> bool:
+        """写入一条日记记录（food_entry / exercise_entry）。
+
+        MFP 可能在**已经写入后**才返回 5xx 或超时，盲目重试会写两条（热量双计）。
+        因此每次失败先调用 verify() 回读确认：已落库按成功处理，未落库才重试。
+        verify 返回 False 表示「确认未落库」或「无法判断」，后者仍按原逻辑重试。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = self.session.post(f"{self.BASE_URL}/diary", json={"items": [diary_entry]})
+                response.raise_for_status()
+                return True
+            except Exception as exc:
+                last_exc = exc
+                retryable = is_server_error(exc) or isinstance(
+                    exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)
+                )
+                if not retryable:
+                    raise
+                if verify is not None:
+                    try:
+                        if verify():
+                            logger.warning("写入返回错误但回读确认已落库，按成功处理以避免重复写入: {}", exc)
+                            return True
+                    except Exception as verify_exc:
+                        logger.warning("回读校验异常，按未落库处理: {}", verify_exc)
+                if attempt < 2:
+                    time.sleep(2**attempt)
+        if last_exc is not None:
+            raise last_exc
+        return False
 
 mcp = FastMCP("Auto_Nutrition")
 adapter = None
@@ -1239,11 +1298,27 @@ def get_adapter():
         adapter = MFPAdapter()
     return adapter
 
+def _date_warnings(date_str: str) -> list[str]:
+    """日期合理性提示：格式错误 / 未来预录 / 长期补录。四个写工具共用。"""
+    try:
+        target = datetime.strptime(date_str, "%Y-%m-%d").date()
+        delta = (target - datetime.now().date()).days
+    except (TypeError, ValueError):
+        return [f"⚠️ 日期「{date_str}」格式无法识别，应为 YYYY-MM-DD。"]
+    if not isinstance(delta, int):  # 时钟被替换为 mock 时放弃判断
+        return []
+    if delta > 0:
+        return [f"⚠️ 你正在写入未来日期 {date_str}（+{delta} 天），请确认不是笔误。"]
+    if delta < -7:
+        return [f"⚠️ 你正在补录 {-delta} 天前的数据（{date_str}），请确认日期无误。"]
+    return []
+
+
 def _meal_time_warnings(date_str: str, meal_type: str) -> list[str]:
     """餐次与系统时间的偏差提示，record_nutrition / record_meal 共用。"""
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
-    warnings: list[str] = []
+    warnings: list[str] = _date_warnings(date_str)
     if date_str != today_str:
         warnings.append(f"⚠️ 注意：当前日期为 {today_str}，但正在录入 {date_str} 的数据。")
 
@@ -1507,6 +1582,23 @@ def get_daily_summary(date: str) -> str:
 
         cal_remaining = cal_goal - eaten["calories"] + cal_burned
 
+        # 口径校验：v2 聚合值 vs 网页逐条合计，差异过大说明后台未同步，必须明示
+        consistency = ""
+        try:
+            html_entries = mfp.get_food_entries_from_html(date)
+            html_calories = sum(float(e.get("calories") or 0) for e in html_entries)
+            if html_entries:
+                diff = html_calories - eaten["calories"]
+                tolerance = max(15.0, eaten["calories"] * 0.02)
+                if abs(diff) > tolerance:
+                    consistency = (
+                        f"\n⚠️ 口径差异：v2 聚合 {round(eaten['calories'])} kcal，"
+                        f"网页逐条合计 {round(html_calories)} kcal（差 {round(diff):+}）。"
+                        "以网页明细为准，MFP 后台可能尚未同步。"
+                    )
+        except Exception as exc:
+            logger.debug("口径一致性校验失败，已跳过: {}", exc)
+
         water_ml: float | None = None
         try:
             water_ml = mfp.get_water(date)
@@ -1560,7 +1652,7 @@ def get_daily_summary(date: str) -> str:
             f"🥩 蛋白质剩余: {round(max(0, protein_goal - eaten['protein']), 1)}g\n"
             f"🍞 碳水剩余: {round(max(0, carbs_goal - eaten['carbs']), 1)}g\n"
             f"🥑 脂肪剩余: {round(max(0, fat_goal - eaten['fat']), 1)}g"
-            f"{extras}\n\n"
+            f"{extras}{consistency}\n\n"
             f"💡 建议: 您今天目前的'可用余额'剩余 {round(cal_remaining)} kcal。"
             f"{user_section}{warning}"
         )
@@ -2090,10 +2182,25 @@ def record_exercise(exercise: ExerciseModel) -> str:
             if exercise.weight_kg:
                 diary_entry["weight_per_set"] = {"value": exercise.weight_kg, "unit": "kilograms"}
 
-        mfp._post_diary_entry(diary_entry)
+        def _exercise_count() -> int:
+            items = mfp.get_diary_data(exercise.date).get("items", [])
+            return sum(1 for i in items if i.get("type") == "exercise_entry")
+
+        try:
+            exercise_before = _exercise_count()
+        except Exception as exc:
+            logger.warning("读取运动基线失败，跳过防双写校验: {}", exc)
+            exercise_before = None
+
+        mfp._post_diary_entry(
+            diary_entry,
+            verify=lambda: exercise_before is not None and _exercise_count() > exercise_before,
+        )
 
         type_cn = "有氧" if exercise.exercise_type.lower() == "cardio" else "力量"
-        return f"成功记录{type_cn}运动: {exercise.name} ({exercise.date})。"
+        output = f"成功记录{type_cn}运动: {exercise.name} ({exercise.date})。"
+        warnings = _date_warnings(exercise.date)
+        return output + ("\n\n" + "\n".join(warnings) if warnings else "")
     except Exception as exc:
         return f"记录运动失败: {exc}"
 
@@ -2110,12 +2217,14 @@ def record_measurement(measurement_type: str, value: float, date: str) -> str:
     """
     try:
         mfp = get_adapter()
+        warnings = _date_warnings(date)
+        suffix = ("\n\n" + "\n".join(warnings)) if warnings else ""
         if measurement_type.lower() == "weight":
             mfp.record_weight(value, date)
-            return f"体重 {value}kg 记录成功 ({date})。"
+            return f"体重 {value}kg 记录成功 ({date})。{suffix}"
         elif measurement_type.lower() == "water":
             mfp.record_water(int(value), date)
-            return f"成功记录饮水量: {int(value)}ml ({date})。"
+            return f"成功记录饮水量: {int(value)}ml ({date})。{suffix}"
         else:
             return f"未知类型 '{measurement_type}'，请使用 'weight' 或 'water'。"
     except Exception as exc:

@@ -1086,3 +1086,75 @@ class TestHealthCheck:
             from mfp_adapter import health_check
             result = health_check()
             assert "⚠️" in result
+
+
+class TestSummaryConsistency:
+    def _setup(self, mock_get_adapter, html_entries):
+        mock_get_adapter.get_diary_data.return_value = {"items": [
+            {"type": "diary_meal", "nutritional_contents": {
+                "energy": {"value": 300}, "protein": 10, "carbohydrates": 40, "fat": 5}},
+        ]}
+        mock_get_adapter.get_nutrition_goals.return_value = {
+            "energy": {"value": 2800}, "protein": 210, "carbohydrates": 280, "fat": 93}
+        mock_get_adapter.get_water.return_value = 0.0
+        mock_get_adapter.get_food_entries_from_html.return_value = html_entries
+
+    def test_warns_when_v2_and_html_disagree(self, mock_get_adapter):
+        self._setup(mock_get_adapter, [{"calories": 450}])
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-10-23")
+            assert "口径" in result
+            assert "450" in result
+
+    def test_silent_when_totals_match(self, mock_get_adapter):
+        self._setup(mock_get_adapter, [{"calories": 305}])
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            result = get_daily_summary("2026-10-23")
+            assert "口径" not in result
+
+    def test_html_failure_does_not_break_summary(self, mock_get_adapter):
+        self._setup(mock_get_adapter, [])
+        mock_get_adapter.get_food_entries_from_html.side_effect = Exception("html down")
+
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import get_daily_summary
+            assert "营养预算总结" in get_daily_summary("2026-10-23")
+
+
+class TestWriteDateWarnings:
+    def _freeze(self, monkeypatch):
+        import datetime as dt
+
+        class FrozenDatetime(dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 10, 23, 9, 0, 0)
+
+        monkeypatch.setattr("mfp_adapter.datetime", FrozenDatetime)
+
+    def test_record_measurement_warns_on_future_date(self, mock_get_adapter, monkeypatch):
+        self._freeze(monkeypatch)
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_measurement
+            result = record_measurement("water", 250, "2026-12-01")
+            assert "未来" in result
+
+    def test_record_exercise_warns_on_future_date(self, mock_get_adapter, monkeypatch):
+        self._freeze(monkeypatch)
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import ExerciseModel, record_exercise
+            result = record_exercise(ExerciseModel(
+                name="Running", exercise_type="cardio", date="2026-12-01", calories_burned=300))
+            assert "未来" in result
+
+    def test_record_nutrition_warns_on_long_past(self, mock_get_adapter, monkeypatch):
+        self._freeze(monkeypatch)
+        mock_get_adapter.record_nutrition.return_value = {"status": "ok", "count": 1}
+        with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
+            from mfp_adapter import record_nutrition
+            result = record_nutrition("2026-09-01", "breakfast", ["Oats"])
+            assert "补录" in result
