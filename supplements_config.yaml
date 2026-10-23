@@ -52,6 +52,12 @@ supplements:
     macros: { carbs: 0, protein: 0, fat: 0 }
     micros: { sodium: 300, potassium: 150 }
     aliases: ["盐丸", "电解质片", "电解质冲剂", "补盐", "吃颗盐", "Salt Pill", "泡腾片", "S-Caps"]
+  creatine_monohydrate_3g:
+    name: "Creatine Monohydrate (一水肌酸 3g - 99.9% 纯度)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    aliases: ["肌酸", "一水肌酸", "肌酸粉", "creatine", "Creatine", "Creatine Monohydrate", "3g肌酸"]
+    # 服用建议：每日 3g + 150-200ml 水，训练后、晚餐前
 
   # --- 精准运动功能饮料与补剂 ---
   gatorade_600ml:
