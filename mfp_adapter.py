@@ -520,6 +520,22 @@ class MFPAdapter:
         return {"id": food_info["id"], "version": food_info["version"]}
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
+    def get_water(self, date_str: str) -> float:
+        """
+        读取指定日期的饮水总量（毫升）。
+
+        v2 无对应读接口，网页端 /food/water 返回 {"item": {"milliliters": ...}}。
+        """
+        self._ensure_token_valid()
+        resp = self.session.get(
+            f"https://www.myfitnesspal.com/food/water?date={date_str}",
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        item = resp.json().get("item") or {}
+        return float(item.get("milliliters") or 0.0)
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def get_diary_data(self, date_str: str) -> dict[str, Any]:
         self._ensure_token_valid()
         endpoint = f"{self.BASE_URL}/diary?entry_date={date_str}"
@@ -970,6 +986,51 @@ class MFPAdapter:
             result["warnings"] = [f'⚠️ 以下食物写入失败: {", ".join(failed)}']
         return result
 
+    def _remove_from_journal(self, date_str: str, meal_name: str, item_name: str) -> int:
+        """
+        从本地高保真日志中删除一条已从 MFP 移除的食物。
+
+        只删除最后一个匹配项（同日期 + 同餐次 + 同名字），删空的日志条目整体移除。
+        返回实际删除的条数，供调用方提示。
+        """
+        if not os.path.exists(self.JOURNAL_FILE):
+            return 0
+        try:
+            with open(self.JOURNAL_FILE, encoding="utf-8") as f:
+                journal = json.load(f)
+        except Exception as e:
+            logger.error("读取本地日志失败，跳过同步: {}", e)
+            return 0
+
+        removed = 0
+        for entry in reversed(journal):
+            if entry.get("date") != date_str or entry.get("meal_name") != meal_name:
+                continue
+            for item in reversed(entry.get("items", [])):
+                if item.get("name") == item_name:
+                    entry["items"].remove(item)
+                    removed = 1
+                    break
+            if removed:
+                break
+
+        if not removed:
+            return 0
+
+        journal = [e for e in journal if e.get("items")]
+        try:
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
+                json.dump(journal, tf, indent=2, ensure_ascii=False)
+                temp_name = tf.name
+            os.replace(temp_name, self.JOURNAL_FILE)
+            logger.info("本地日志已同步删除: {} / {}", meal_name, item_name)
+        except Exception as e:
+            logger.error("本地日志同步删除失败: {}", e)
+            if 'temp_name' in locals() and os.path.exists(temp_name):
+                os.remove(temp_name)
+            return 0
+        return removed
+
     def _log_to_local_journal(self, date_str: str, meal_name: str, items: list[dict[str, Any]]) -> None:
         """
         在本地保存完整的营养数据副本，包括 MFP 不支持的微量元素。
@@ -1140,6 +1201,9 @@ class MFPAdapter:
             "carbohydrates": values[1],
             "fat": values[2],
             "protein": values[3],
+            **({"sodium": values[4]} if len(values) > 4 else {}),
+            **({"sugar": values[5]} if len(values) > 5 else {}),
+            "_source": "web",
         }
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
@@ -1156,7 +1220,9 @@ class MFPAdapter:
                 return self._goals_from_web_diary(date_str)
             raise
         data = response.json()
-        return data.get("items", [{}])[0]
+        goal_item = data.get("items", [{}])[0]
+        goal_item["_source"] = "api"
+        return goal_item
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def _post_diary_entry(self, diary_entry: dict[str, Any]) -> None:
@@ -1306,6 +1372,57 @@ def record_meal(date: str, meal_type: str, meal_ref: int | str) -> str:
         return f"错误: {exc}"
 
 @mcp.tool()
+def get_goals(date: str) -> str:
+    """
+    Show the nutrition goals MyFitnessPal uses for a date, with their source.
+    查询指定日期 MyFitnessPal 使用的营养目标（热量/蛋白/碳水/脂肪/钠/糖）及其来源。
+
+    v2 接口只返回四大项；钠和糖需要回退到网页日记的目标行，缺失时显示 —。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+    """
+    try:
+        mfp = get_adapter()
+        goals = mfp.get_nutrition_goals(date)
+
+        def value_of(key: str) -> float | None:
+            raw = goals.get(key)
+            if isinstance(raw, dict):
+                raw = raw.get("value")
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        def cell(value: float | None, unit: str) -> str:
+            return "—" if value is None else f"{round(value)} {unit}" if value.is_integer() else f"{value:.1f} {unit}"
+
+        rows = [
+            ("热量", cell(value_of("energy"), "kcal")),
+            ("蛋白质", cell(value_of("protein"), "g")),
+            ("碳水", cell(value_of("carbohydrates"), "g")),
+            ("脂肪", cell(value_of("fat"), "g")),
+            ("钠", cell(value_of("sodium"), "mg")),
+            ("糖", cell(value_of("sugar"), "g")),
+        ]
+        source = goals.get("_source", "unknown")
+        source_text = "v2 接口" if source == "api" else "网页日记（v2 已移除该端点）" if source == "web" else "未知"
+
+        table = ["| 项目 | 目标 |", "| --- | ---: |"]
+        table.extend(f"| {name} | {target} |" for name, target in rows)
+        return (
+            f"### 🎯 {date} 营养目标 (来源: {source})\n\n"
+            + "\n".join(table)
+            + f"\n\n> 数据来源：{source_text}"
+        )
+    except Exception as exc:
+        return f"获取目标失败: {exc}"
+
+
+@mcp.tool()
 def get_daily_summary(date: str) -> str:
     """
     Get a daily nutrition budget summary (calories, protein, carbs, fat) for a specific date.
@@ -1318,7 +1435,8 @@ def get_daily_summary(date: str) -> str:
         mfp = get_adapter()
         diary_data = mfp.get_diary_data(date)
 
-        # 尝试获取真实目标，获取失败则使用默认值
+        goals_ok = True
+        # 尝试获取真实目标，获取失败则使用默认值并在输出中显式标注
         try:
             goals = mfp.get_nutrition_goals(date)
             cal_goal = float(goals.get("energy", {}).get("value", 2800.0))
@@ -1327,31 +1445,74 @@ def get_daily_summary(date: str) -> str:
             fat_goal = float(goals.get("fat", 93.0))
             logger.info("成功获取 {} 的动态营养目标", date)
         except Exception as e:
+            goals_ok = False
+            goals = {}
             logger.warning("获取动态目标失败，使用新版保底目标 (40/30/30): {}", e)
             cal_goal = 2800.0
             protein_goal = 210.0
             carbs_goal = 280.0
             fat_goal = 93.0
 
-        cal_eaten = 0.0
-        protein_eaten = 0.0
-        carbs_eaten = 0.0
-        fat_eaten = 0.0
+        def nutrient(source: dict[str, Any], key: str) -> float:
+            """MFP 营养素字段既可能是数值，也可能是 {"value": ...} 结构。"""
+            raw = source.get(key, 0)
+            if isinstance(raw, dict):
+                raw = raw.get("value", 0)
+            return float(raw or 0)
+
+        def goal_value(key: str) -> float | None:
+            raw = goals.get(key)
+            if isinstance(raw, dict):
+                raw = raw.get("value")
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        items = diary_data.get("items", [])
+
+        # 口径统一：v2 同时返回 diary_meal（每餐聚合）与 food_entry（可能重复），
+        # 优先只统计 diary_meal，避免同一食物被计两次。
+        macro_items = [i for i in items if i.get("type") == "diary_meal"]
+        if not macro_items:
+            macro_items = [i for i in items if i.get("type") == "food_entry"]
+
+        eaten = {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0, "sodium": 0.0, "sugar": 0.0}
+        for item in macro_items:
+            nc = item.get("nutritional_contents", {})
+            eaten["calories"] += nutrient(nc, "energy")
+            eaten["protein"] += nutrient(nc, "protein")
+            eaten["carbs"] += nutrient(nc, "carbohydrates")
+            eaten["fat"] += nutrient(nc, "fat")
+            eaten["sodium"] += nutrient(nc, "sodium")
+            eaten["sugar"] += nutrient(nc, "sugar")
+
         cal_burned = 0.0
-
-        for item in diary_data.get("items", []):
+        exercise_lines: list[str] = []
+        steps = 0
+        for item in items:
             itype = item.get("type")
-            if itype in ["diary_meal", "food_entry"]:
-                nc = item.get("nutritional_contents", {})
-                cal_eaten += nc.get("energy", {}).get("value", 0)
-                protein_eaten += nc.get("protein", 0)
-                carbs_eaten += nc.get("carbohydrates", 0)
-                fat_eaten += nc.get("fat", 0)
-            elif itype == "exercise_entry":
-                cal_burned += item.get("energy", {}).get("value", 0)
+            if itype == "exercise_entry":
+                energy = nutrient(item, "energy")
+                cal_burned += energy
+                exercise = item.get("exercise") or {}
+                name = exercise.get("description") or item.get("exercise_name") or "运动"
+                duration = item.get("duration")
+                minutes = f" {round(duration / 60)}min" if duration else ""
+                exercise_lines.append(f"{name}{minutes} · {round(energy)} kcal")
+            elif itype == "steps_aggregate":
+                steps += int(item.get("steps") or 0)
 
-        cal_remaining = cal_goal - cal_eaten + cal_burned
+        cal_remaining = cal_goal - eaten["calories"] + cal_burned
 
+        water_ml: float | None = None
+        try:
+            water_ml = mfp.get_water(date)
+        except Exception as exc:
+            # 饮水只是附加信息，取不到不影响预算计算
+            logger.debug("获取饮水失败，已跳过: {}", exc)
 
         # 用户体征数据 (原 get_user_metadata 功能)
         user_section = ""
@@ -1366,14 +1527,42 @@ def get_daily_summary(date: str) -> str:
             # 体重只是附加信息，取不到不影响预算计算
             logger.debug("获取体重失败，已跳过体征展示: {}", exc)
 
+        extra_lines: list[str] = []
+        sodium_goal = goal_value("sodium")
+        if eaten["sodium"]:
+            extra_lines.append(
+                f"🧂 钠: {round(eaten['sodium'])}mg 已摄入"
+                + (f" / 剩余 {round(max(0, sodium_goal - eaten['sodium']))}mg" if sodium_goal else "")
+            )
+        sugar_goal = goal_value("sugar")
+        if eaten["sugar"]:
+            extra_lines.append(
+                f"🍬 糖: {round(eaten['sugar'], 1)}g 已摄入"
+                + (f" / 剩余 {round(max(0, sugar_goal - eaten['sugar']), 1)}g" if sugar_goal else "")
+            )
+        if water_ml is not None:
+            extra_lines.append(f"💧 饮水: {round(water_ml)} ml")
+        if exercise_lines:
+            extra_lines.append(f"🏃 运动: {'；'.join(exercise_lines)}")
+        if steps:
+            extra_lines.append(f"👣 步数: {steps}")
+
+        warning = (
+            ""
+            if goals_ok
+            else "\n⚠️ 未能读取你的真实目标，以下目标为默认值 (2800/210/280/93)，仅供参考。"
+        )
+        extras = ("\n" + "\n".join(extra_lines)) if extra_lines else ""
+
         output = (
             f"📅 {date} 营养预算总结:\n"
-            f"🔥 卡路里: {round(cal_goal)} (目标) - {round(cal_eaten)} (已吃) + {round(cal_burned)} (运动) = {round(cal_remaining)} (剩余)\n"
-            f"🥩 蛋白质剩余: {round(max(0, protein_goal - protein_eaten), 1)}g\n"
-            f"🍞 碳水剩余: {round(max(0, carbs_goal - carbs_eaten), 1)}g\n"
-            f"🥑 脂肪剩余: {round(max(0, fat_goal - fat_eaten), 1)}g\n\n"
+            f"🔥 卡路里: {round(cal_goal)} (目标) - {round(eaten['calories'])} (已吃) + {round(cal_burned)} (运动) = {round(cal_remaining)} (剩余)\n"
+            f"🥩 蛋白质剩余: {round(max(0, protein_goal - eaten['protein']), 1)}g\n"
+            f"🍞 碳水剩余: {round(max(0, carbs_goal - eaten['carbs']), 1)}g\n"
+            f"🥑 脂肪剩余: {round(max(0, fat_goal - eaten['fat']), 1)}g"
+            f"{extras}\n\n"
             f"💡 建议: 您今天目前的'可用余额'剩余 {round(cal_remaining)} kcal。"
-            f"{user_section}"
+            f"{user_section}{warning}"
         )
         return output
     except Exception as exc:
@@ -1447,18 +1636,18 @@ def get_diary_entries(date: str, meal_type: str | None = None) -> str:
                 day_totals[key] += value
 
             rows = [
-                "| 食物 | 热量 | 蛋白 | 碳水 | 脂肪 |",
-                "| --- | ---: | ---: | ---: | ---: |",
+                "| 食物 | 热量 | 蛋白 | 碳水 | 脂肪 | ID |",
+                "| --- | ---: | ---: | ---: | ---: | --- |",
             ]
             rows.extend(
                 f"| {i.get('name', '未知食物')} | {cal_text(calories(i))} | "
                 f"{macro_text(macro(i, 'protein'))} | {macro_text(macro(i, 'carbs'))} | "
-                f"{macro_text(macro(i, 'fat'))} |"
+                f"{macro_text(macro(i, 'fat'))} | {i.get('id', '—')} |"
                 for i in items
             )
             rows.append(
                 f"| **小计** | **{cal_text(totals['calories'])}** | **{macro_text(totals['protein'])}** | "
-                f"**{macro_text(totals['carbs'])}** | **{macro_text(totals['fat'])}** |"
+                f"**{macro_text(totals['carbs'])}** | **{macro_text(totals['fat'])}** |  |"
             )
             sections.append(f"**{meal}** ({len(items)} 项)\n" + "\n".join(rows))
 
@@ -1664,15 +1853,94 @@ def get_food_config() -> str:
         return f"获取配置失败: {exc}"
 
 @mcp.tool()
-def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None) -> str:
+def delete_entry(date: str, entry_id: str | None = None, name: str | None = None, meal_type: str | None = None) -> str:
     """
-    Delete records. Supports deleting the most recent N entries or all entries for a specific meal type.
-    删除记录。支持删除最近的 N 条，或删除指定餐次（如 breakfast/lunch/dinner/snack）的所有记录。
+    Delete one specific diary entry by entry id or food name, and sync the local journal.
+    按条目 ID 或食物名精确删除某一条饮食记录，并同步本地高保真日志。
+
+    先用 get_diary_entries 查到 ID（表格最右列）；name 支持精确匹配与唯一子串，
+    匹配到多条时返回候选、不删除。本工具只删饮食记录，不处理运动。
 
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
-        count (int): Number of most recent items to delete. | 待删除的最近条目数。
-        meal_type (str, optional): Meal type to target for deletion. | 指定删除的餐次。
+        entry_id (str, optional): Entry ID from get_diary_entries. | 条目 ID。
+        name (str, optional): Food name (exact or unique substring). | 食物名称。
+        meal_type (str, optional): Narrow the search to one meal. | 限定餐次。
+    """
+    try:
+        mfp = get_adapter()
+        meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
+
+        target_meal: str | None = None
+        if meal_type:
+            target_meal = meal_map.get(meal_type.strip().lower())
+            if not target_meal:
+                return f"未知餐次「{meal_type}」，可选：breakfast / lunch / dinner / snack。"
+
+        if not entry_id and not name:
+            return "请提供 entry_id 或 name（可先用 get_diary_entries 查询）。"
+
+        entries = mfp.get_food_entries_from_html(date)
+        if target_meal:
+            entries = [e for e in entries if e.get("meal") == target_meal]
+        if not entries:
+            return f"{date} 没有找到可删除的饮食记录。"
+
+        def candidates_msg(matches: list[dict[str, Any]]) -> str:
+            listed = "；".join(f"{e.get('name')} (id={e.get('id')}, {e.get('meal')})" for e in matches)
+            return f"「{name}」匹配到多个记录：{listed}。请用 entry_id 指定。"
+
+        target: dict[str, Any] | None = None
+        if entry_id:
+            target = next((e for e in entries if str(e.get("id")) == str(entry_id)), None)
+            if target is None:
+                return f"{date} 没有找到 id={entry_id} 的饮食记录。"
+        else:
+            needle = (name or "").strip().lower()
+            exact = [e for e in entries if (e.get("name") or "").strip().lower() == needle]
+            if len(exact) == 1:
+                target = exact[0]
+            elif len(exact) > 1:
+                return candidates_msg(exact)
+            else:
+                contained = [e for e in entries if needle and needle in (e.get("name") or "").lower()]
+                if len(contained) == 1:
+                    target = contained[0]
+                elif len(contained) > 1:
+                    return candidates_msg(contained)
+                else:
+                    return f"{date} 没有名称匹配「{name}」的饮食记录。"
+
+        entry_name = target.get("name") or "未知食物"
+        target_id = target.get("id")
+        if not target_id:
+            return f"「{entry_name}」缺少 entry id，无法删除。"
+
+        if not mfp.delete_diary_entry(str(target_id)):
+            return f"删除失败：「{entry_name}」可能已被移除。"
+
+        removed = mfp._remove_from_journal(date, target.get("meal") or "", entry_name)
+        sync_note = "本地日志已同步" if removed else "本地日志无匹配项"
+        return f"已删除 {target.get('meal')} 的「{entry_name}」（id={target_id}），{sync_note}。"
+
+    except Exception as exc:
+        return f"删除失败: {exc}"
+
+
+@mcp.tool()
+def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None, all_in_meal: bool = False) -> str:
+    """
+    Delete the last N food entries of a date, or every entry of one meal.
+    删除指定日期最近的 N 条饮食记录，或整餐删除。
+
+    count 始终表示「精确删除 N 条」（按日记展示顺序从后往前）；
+    要清空整个餐次，请传 all_in_meal=True。运动与饮水记录不在此工具范围内。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        count (int): Exact number of entries to delete. | 精确删除的条目数。
+        meal_type (str, optional): Limit deletion to one meal. | 限定餐次。
+        all_in_meal (bool): Delete every entry of the meal (ignores count). | 整餐删除。
     """
     try:
         mfp = get_adapter()
@@ -1683,27 +1951,30 @@ def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None) -
         meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
         target_meal_name = meal_map.get(meal_type.lower()) if meal_type else None
 
+        if meal_type and not target_meal_name:
+            return f"未知餐次「{meal_type}」，可选：breakfast / lunch / dinner / snack。"
+
         if target_meal_name:
             food_entries = [e for e in food_entries if e.get("meal") == target_meal_name]
             if not food_entries:
                 return f"{date} 的 {meal_type} 没有找到可以删除的饮食记录。"
-            # 如果指定了餐次且未特别指定数量，默认删除该餐次的所有记录
-            if count == 1:
-                to_delete = food_entries
-            else:
-                to_delete = food_entries[-count:]
+        elif not food_entries:
+            return f"{date} 没有找到可以删除的饮食记录。"
+
+        if all_in_meal:
+            to_delete = food_entries
         else:
-            if not food_entries:
-                return f"{date} 没有找到可以删除的饮食记录。"
+            if count < 1:
+                return "count 必须 ≥ 1；若要整餐删除请传 all_in_meal=True。"
             to_delete = food_entries[-count:]
 
         deleted_names = []
         for entry in to_delete:
             entry_id = entry.get("id")
-            name = entry.get("name", "未知食物")
-            if entry_id:
-                if mfp.delete_diary_entry(entry_id):
-                    deleted_names.append(name)
+            entry_name = entry.get("name", "未知食物")
+            if entry_id and mfp.delete_diary_entry(entry_id):
+                deleted_names.append(entry_name)
+                mfp._remove_from_journal(date, entry.get("meal") or "", entry_name)
 
         if not deleted_names:
             return "未能成功删除任何条目。"
@@ -1712,6 +1983,77 @@ def delete_last_entry(date: str, count: int = 1, meal_type: str | None = None) -
         return f"已成功删除以下{meal_msg}记录: {', '.join(deleted_names)}"
     except Exception as exc:
         return f"删除失败: {exc}"
+
+@mcp.tool()
+def health_check() -> str:
+    """
+    Diagnose the server: session/cookies, local config, USDA database, goals and water endpoints.
+    一键体检：会话与 Cookie、本地配置、USDA 库、目标解析、饮水读取。
+
+    只做只读检查，不写入任何数据。会话失效时会指向 get_cookie_guide 的修复步骤。
+
+    Args:
+        None | 无
+    """
+    mfp = get_adapter()
+    today = datetime.now().strftime("%Y-%m-%d")
+    checks: list[tuple[str, str, str]] = []  # (状态, 名称, 说明)
+
+    def run(name: str, func, describe) -> None:
+        try:
+            result = describe(func())
+            status, detail = result if isinstance(result, tuple) else ("✅", result)
+            checks.append((status, name, detail))
+        except Exception as exc:
+            checks.append(("❌", name, str(exc)))
+
+    def token_desc(_: Any) -> str:
+        return "Bearer token 有效"
+
+    run("Cookie/会话", mfp._ensure_token_valid, token_desc)
+
+    def config_desc(conf: dict[str, Any]) -> str:
+        sections = [k for k in ("supplements", "common_foods", "regional_foods", "routines", "meal_combos") if conf.get(k)]
+        return f"{len(sections)} 个配置段: {', '.join(sections) or '无'}"
+
+    run("本地配置", mfp._load_config, config_desc)
+
+    def usda_desc(rows: list[dict[str, Any]]) -> tuple[str, str]:
+        if rows:
+            return ("✅", f"检索正常（命中 {len(rows)} 条）")
+        return ("⚠️", "检索无结果，可能是 FTS 索引或数据库异常")
+
+    run("USDA 库", lambda: mfp.usda.search("oats", page_size=1), usda_desc)
+
+    def goals_desc(goals: dict[str, Any]) -> str:
+        source = goals.get("_source", "unknown")
+        source_text = {"api": "v2 接口", "web": "网页日记"}.get(source, source)
+        energy = goals.get("energy", {})
+        calories = energy.get("value") if isinstance(energy, dict) else energy
+        extras = [k for k in ("sodium", "sugar") if goals.get(k) is not None]
+        return f"{round(float(calories or 0))} kcal，来源 {source_text}" + (f"，含 {', '.join(extras)}" if extras else "，缺 sodium/sugar")
+
+    run("目标解析", lambda: mfp.get_nutrition_goals(today), goals_desc)
+    run("饮水读取", lambda: mfp.get_water(today), lambda ml: f"{round(ml)} ml")
+
+    lines = [
+        f"{status} {name}：{detail}" if status == "✅" else f"{status} {name}：{detail}"
+        for status, name, detail in checks
+    ]
+
+    blocking = any(status == "❌" and name == "Cookie/会话" for status, name, _ in checks)
+    failed = [name for status, name, _ in checks if status == "❌"]
+    degraded = [name for status, name, _ in checks if status == "⚠️"]
+
+    if blocking:
+        conclusion = "❌ 会话已失效，所有读写都会失败。请调用 get_cookie_guide 重新导入 Cookie。"
+    elif failed or degraded:
+        conclusion = f"⚠️ 有降级项：{', '.join(failed + degraded)}。其余功能可用。"
+    else:
+        conclusion = "✅ 全部正常"
+
+    return f"### 🩺 Auto_Nutrition 体检 ({today})\n\n" + "\n".join(lines) + f"\n\n**结论**：{conclusion}"
+
 
 @mcp.tool()
 def record_exercise(exercise: ExerciseModel) -> str:
