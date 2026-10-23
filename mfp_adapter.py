@@ -908,18 +908,7 @@ class MFPAdapter:
         diary_snapshot = self._diary_entries_snapshot(date_str)
 
         def _verify_written(item_name: str) -> bool:
-            if diary_snapshot is None:
-                return False
-            before = sum(1 for meal, name in diary_snapshot if meal == meal_name and item_name in name)
-            try:
-                current = self.get_food_entries_from_html(date_str)
-            except Exception:
-                return False
-            after = sum(
-                1 for e in current
-                if (e.get("meal") or "") == meal_name and item_name in (e.get("name") or "")
-            )
-            return after > before
+            return self._verify_item_written(date_str, meal_name, item_name, diary_snapshot)
 
         for raw_item in expanded_items:
             # 提取 AI 暂存值
@@ -1109,6 +1098,8 @@ class MFPAdapter:
 
         items: list[dict[str, Any]] = []
         results = []
+        # 写入前基线：仅用于 5xx/超时后判断「是否已落库」，避免重试造成双计
+        diary_snapshot = self._diary_entries_snapshot(date_str)
         for food in foods:
             item = {
                 "name": food.get("description") or "未命名食物",
@@ -1134,7 +1125,12 @@ class MFPAdapter:
                     "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
                     "client_id": "mfp-main-js"
                 }
-                self._post_diary_entry(diary_entry)
+                self._post_diary_entry(
+                    diary_entry,
+                    verify=partial(
+                        self._verify_item_written, date_str, meal_name, item["name"], diary_snapshot
+                    ),
+                )
                 results.append({"name": item["name"], "calories": item["calories"], "status": "ok"})
                 logger.info('套餐录入: "{name}" ({cal} kcal)', name=item["name"], cal=item["calories"])
             except requests.exceptions.HTTPError as he:
@@ -1476,6 +1472,31 @@ class MFPAdapter:
             logger.warning("读取日记基线失败，写入后将跳过防双写校验: {}", exc)
             return None
         return [(e.get("meal") or "", e.get("name") or "") for e in entries]
+
+    def _verify_item_written(
+        self,
+        date_str: str,
+        meal_name: str,
+        item_name: str,
+        snapshot: list[tuple[str, str]] | None,
+    ) -> bool:
+        """写入报错后回读：该餐次下名字包含 item_name 的条目数是否增加了。
+
+        record_nutrition / record_meal 共用。snapshot 为 None 表示基线没取到，
+        无法判断，返回 False（交给 _post_diary_entry 按「未落库」重试）。
+        """
+        if snapshot is None:
+            return False
+        before = sum(1 for meal, name in snapshot if meal == meal_name and item_name in name)
+        try:
+            current = self.get_food_entries_from_html(date_str)
+        except Exception:
+            return False
+        after = sum(
+            1 for e in current
+            if (e.get("meal") or "") == meal_name and item_name in (e.get("name") or "")
+        )
+        return after > before
 
     def _post_diary_entry(self, diary_entry: dict[str, Any], verify: Callable[[], bool] | None = None) -> bool:
         """写入一条日记记录（food_entry / exercise_entry）。

@@ -209,6 +209,73 @@ class TestRecordMeal:
         entry = adapter._post_diary_entry.call_args[0][0]
         assert entry["meal_name"] == "Snacks"
 
+    def test_partial_failure_does_not_journal_failed_item(self, adapter, no_sleep):
+        """回归：写入失败的套餐项不能进本地流水账（否则趋势虚高）。"""
+        self._stub(adapter)
+        adapter._create_custom_food = MagicMock(
+            side_effect=[{"id": "food-1", "version": 1}, RuntimeError("boom")]
+        )
+
+        adapter.record_meal("2026-01-01", "dinner", 4424592565)
+
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert len(journal) == 1
+        names = [i["name"] for i in journal[0]["items"]]
+        assert names == ["纯牛奶 - 牛奶, 250 ml"]
+        assert "我的蛋白粉 - 蛋白粉, 100 g" not in names
+
+    def test_all_failure_writes_empty_journal(self, adapter, no_sleep):
+        self._stub(adapter)
+        adapter._create_custom_food = MagicMock(side_effect=RuntimeError("boom"))
+
+        result = adapter.record_meal("2026-01-01", "dinner", 4424592565)
+
+        assert result["status"] == "partial"
+        if os.path.exists(adapter.JOURNAL_FILE):
+            with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+                assert json.load(f) == []
+
+    def test_passes_verify_guard_to_diary_post(self, adapter, no_sleep):
+        """record_meal 要和 record_nutrition 一样带防双写回读校验。"""
+        self._stub(adapter)
+
+        adapter.record_meal("2026-01-01", "dinner", 4424592565)
+
+        verify = adapter._post_diary_entry.call_args[1].get("verify")
+        assert callable(verify)
+
+
+class TestVerifyItemWritten:
+    def test_detects_new_entry(self, adapter):
+        adapter.get_food_entries_from_html = MagicMock(return_value=[
+            {"meal": "Dinner", "name": "Auto_Nutrition - 牛奶, 1 serving(s)"},
+        ])
+
+        assert adapter._verify_item_written(
+            "2026-01-01", "Dinner", "牛奶", [("Dinner", "别的食物")]
+        ) is True
+
+    def test_false_when_count_unchanged(self, adapter):
+        adapter.get_food_entries_from_html = MagicMock(return_value=[
+            {"meal": "Dinner", "name": "Auto_Nutrition - 牛奶, 1 serving(s)"},
+        ])
+
+        assert adapter._verify_item_written(
+            "2026-01-01", "Dinner", "牛奶", [("Dinner", "Auto_Nutrition - 牛奶, 1 serving(s)")]
+        ) is False
+
+    def test_false_without_snapshot(self, adapter):
+        assert adapter._verify_item_written("2026-01-01", "Dinner", "牛奶", None) is False
+
+    def test_false_when_readback_fails(self, adapter):
+        adapter.get_food_entries_from_html = MagicMock(side_effect=RuntimeError("boom"))
+
+        assert adapter._verify_item_written(
+            "2026-01-01", "Dinner", "牛奶", [("Dinner", "别的")]
+        ) is False
+
+
 
 class TestResolveMeal:
     """meal_ref 支持 ID / 精确名称 / 模糊名称，歧义时必须报错而不是猜测。"""
