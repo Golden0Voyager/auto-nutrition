@@ -129,7 +129,7 @@ Windows：`%APPDATA%\Claude\claude_desktop_config.json`
 
 1. 安装 [uv](https://astral.sh/uv)：`curl -LsSf https://astral.sh/uv/install.sh | sh`
 2. 安装依赖：`uv sync --extra test`
-3. 单元测试（242 个用例，覆盖率 100%）：
+3. 单元测试（451 个用例，覆盖率 99.9%）：
 
    ```bash
    uv run pytest --cov=mfp_adapter --cov-report=term-missing
