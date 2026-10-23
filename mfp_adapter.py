@@ -1104,6 +1104,9 @@ class MFPAdapter:
         if not foods:
             raise ValueError(f"套餐「{meal['name']}」没有任何食物，无法写入。")
 
+        # 整组撤销用的标记：一次 record_meal = 一个 group
+        group_id: str | None = f"{date_str}-{meal.get('meal_id')}-{time.time_ns() // 1_000_000}"
+
         items: list[dict[str, Any]] = []
         results = []
         for food in foods:
@@ -1142,19 +1145,80 @@ class MFPAdapter:
                 logger.error('套餐内 "{name}" 录入失败: {error}', name=item["name"], error=e)
                 results.append({"name": item["name"], "calories": item["calories"], "status": "error", "error": str(e)})
 
-        self._log_to_local_journal(date_str, meal_name, items)
+        # 只记真正写进 MFP 的条目，失败项不能污染趋势/撤销范围
+        written_items = [item for item, r in zip(items, results, strict=True) if r["status"] == "ok"]
+        if written_items:
+            self._log_to_local_journal(date_str, meal_name, written_items, group_id=group_id)
+        else:
+            group_id = None
 
         failed = [r["name"] for r in results if r["status"] == "error"]
         result = {
             "status": "ok" if not failed else "partial",
             "meal": meal["name"],
             "meal_id": meal.get("meal_id"),
+            "group_id": group_id,
             "count": len(results),
             "totals": meal["totals"],
         }
         if failed:
             result["warnings"] = [f'⚠️ 以下食物写入失败: {", ".join(failed)}']
         return result
+
+    def _read_journal(self) -> list[dict[str, Any]]:
+        """读取本地日志；文件缺失或损坏时返回空列表（调用方按「无记录」处理）。"""
+        if not os.path.exists(self.JOURNAL_FILE):
+            return []
+        try:
+            with open(self.JOURNAL_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:
+            logger.error("读取本地日志失败: {}", exc)
+            return []
+        return data if isinstance(data, list) else []
+
+    def _write_journal(self, journal: list[dict[str, Any]]) -> bool:
+        """原子写回本地日志（tempfile + os.replace）。"""
+        temp_name = ""
+        try:
+            directory = os.path.dirname(self.JOURNAL_FILE) or "."
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=directory, encoding="utf-8") as tf:
+                json.dump(journal, tf, indent=2, ensure_ascii=False)
+                temp_name = tf.name
+            os.replace(temp_name, self.JOURNAL_FILE)
+            return True
+        except Exception as exc:
+            logger.error("写回本地日志失败: {}", exc)
+            if temp_name and os.path.exists(temp_name):
+                os.remove(temp_name)
+            return False
+
+    def _journal_groups(self, date_str: str) -> list[dict[str, Any]]:
+        """列出某日 record_meal 写入的套餐组（journal 里带 group_id 的条目）。"""
+        groups: list[dict[str, Any]] = []
+        for entry in self._read_journal():
+            if entry.get("date") != date_str or not entry.get("group_id"):
+                continue
+            items = entry.get("items") or []
+            groups.append({
+                "group_id": entry["group_id"],
+                "meal_name": entry.get("meal_name"),
+                "timestamp": entry.get("timestamp"),
+                "meal": (items[0].get("source_meal") if items else None),
+                "items": [i.get("name") for i in items if i.get("name")],
+            })
+        return groups
+
+    def remove_journal_group(self, date_str: str, group_id: str) -> bool:
+        """从 journal 移除一个套餐组；找不到时返回 False。"""
+        journal = self._read_journal()
+        kept = [
+            e for e in journal
+            if not (e.get("date") == date_str and e.get("group_id") == group_id)
+        ]
+        if len(kept) == len(journal):
+            return False
+        return self._write_journal(kept)
 
     def _remove_from_journal(self, date_str: str, meal_name: str, item_name: str) -> int:
         """
@@ -1201,11 +1265,19 @@ class MFPAdapter:
             return 0
         return removed
 
-    def _log_to_local_journal(self, date_str: str, meal_name: str, items: list[dict[str, Any]]) -> None:
+    def _log_to_local_journal(
+        self,
+        date_str: str,
+        meal_name: str,
+        items: list[dict[str, Any]],
+        group_id: str | None = None,
+    ) -> None:
         """
         在本地保存完整的营养数据副本，包括 MFP 不支持的微量元素。
         采用原子写入（tempfile + os.replace）机制防崩溃。
         写入前自动清理内部字段和 None 值以节省空间。
+
+        group_id 仅 record_meal 使用：一次套餐写入 = 一组，供整组撤销定位。
         """
         try:
             journal = []
@@ -1235,6 +1307,8 @@ class MFPAdapter:
                 "meal_name": meal_name,
                 "items": [_clean_item(it) for it in items]
             }
+            if group_id:
+                entry["group_id"] = group_id
             journal.append(entry)
 
             # 保持近期日志 (保留最近 200 条，约 10 天的完整记录)
@@ -1629,11 +1703,105 @@ def record_meal(date: str, meal_type: str, meal_ref: int | str) -> str:
             f"（{result['count']} 项，{totals['calories']:.0f} kcal）。\n"
             f"详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
         )
+        if result.get("group_id"):
+            output += f"\n\n如需整组撤销：delete_meal_group(date='{date}', group_id='{result['group_id']}')"
         if time_warnings:
             output += "\n\n" + "\n".join(time_warnings)
         return output
     except Exception as exc:
         return f"错误: {exc}"
+
+
+@mcp.tool()
+def delete_meal_group(date: str, group_id: str | None = None, meal_name: str | None = None) -> str:
+    """
+    Undo a meal written by record_meal, as one whole batch.
+    整组撤销 record_meal 写入的套餐（按 group_id 或套餐名）。
+
+    MFP 没有「套餐条目」——record_meal 是按套餐数值展开成逐条食物写入的。
+    本工具靠本地 journal 的 group 标记把这些条目一起删掉；不传参数时
+    列出当日可撤销的组。删到一半失败会保留 group 标记，便于重试。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        group_id (str, optional): Group id returned by record_meal. | 写入时返回的 group_id。
+        meal_name (str, optional): Meal (套餐) name, partial match. | 套餐名（支持部分匹配）。
+    """
+    try:
+        mfp = get_adapter()
+        groups = mfp._journal_groups(date)
+        if not groups:
+            return (
+                f"{date} 没有可撤销的套餐组。只有 record_meal 写入的批次才有 group 标记；"
+                "逐条录入的食物请用 delete_entry / delete_last_entry。"
+            )
+
+        if not group_id and not meal_name:
+            lines = [
+                "| group_id | 套餐 | 餐次 | 条目数 | 写入时间 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+            lines += [
+                f"| {g['group_id']} | {g.get('meal') or '—'} | {g.get('meal_name') or '—'} "
+                f"| {len(g['items'])} | {g.get('timestamp') or '—'} |"
+                for g in groups
+            ]
+            return f"### 🍱 {date} 的套餐组\n\n" + "\n".join(lines)
+
+        if group_id:
+            target = next((g for g in groups if g["group_id"] == group_id), None)
+            if target is None:
+                return f"{date} 没有 group_id=「{group_id}」的套餐组（不带参数调用可查看全部）。"
+        else:
+            needle = (meal_name or "").strip().lower()
+            matches = [g for g in groups if needle and needle in (g.get("meal") or "").lower()]
+            if not matches:
+                return f"{date} 没有套餐名包含「{meal_name}」的套餐组。"
+            if len(matches) > 1:
+                listed = "；".join(
+                    f"{g.get('meal')} (group_id={g['group_id']}, {g.get('timestamp')})" for g in matches
+                )
+                return f"「{meal_name}」匹配到多个套餐组：{listed}。请用 group_id 指定。"
+            target = matches[0]
+
+        entries = mfp.get_food_entries_from_html(date)
+        target_meal = target.get("meal_name")
+        deleted: list[str] = []
+        missing: list[str] = []
+        used: set[str] = set()
+
+        for item_name in target["items"]:
+            needle = item_name.strip().lower()
+            match = next(
+                (
+                    e for e in entries
+                    if str(e.get("id")) not in used
+                    and e.get("meal") == target_meal
+                    and needle in (e.get("name") or "").lower()
+                ),
+                None,
+            )
+            if match is None:
+                missing.append(item_name)
+                continue
+            if mfp.delete_diary_entry(str(match.get("id"))):
+                used.add(str(match.get("id")))
+                deleted.append(item_name)
+            else:
+                missing.append(item_name)
+
+        label = target.get("meal") or target_meal or "套餐"
+        if not missing:
+            mfp.remove_journal_group(date, target["group_id"])
+            return f"已撤销套餐「{label}」：删除 {len(deleted)} 项（{target_meal}, {date}）。"
+        partial = f"已删除 {len(deleted)} 项；" if deleted else ""
+        return (
+            f"撤销未完成：「{label}」{partial}未找到 {len(missing)} 项"
+            f"（{', '.join(missing)}）。group 标记已保留，修正后可用同一 group_id 重试。"
+        )
+    except Exception as exc:
+        return f"撤销套餐失败: {exc}"
+
 
 @mcp.tool()
 def get_goals(date: str) -> str:
