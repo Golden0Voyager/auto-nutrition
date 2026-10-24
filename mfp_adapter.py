@@ -1167,6 +1167,77 @@ class MFPAdapter:
             result["warnings"] = [f'⚠️ 以下食物写入失败: {", ".join(failed)}']
         return result
 
+    def record_daily_supplements(
+        self,
+        date_str: str,
+        include_workout: bool = False,
+        skip: list[str] | None = None,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> str:
+        """把当日补剂按餐次一次记完（晨补 / 晚餐 / 睡前 / 可选训练包）。"""
+        routines = self._load_config().get("routines", {})
+        if not routines:
+            return "错误: 配置里没有任何 routine，无法记录全天补剂。"
+
+        resolved: dict[str, str] = {}
+
+        def resolve(name: str) -> str:
+            if name not in resolved:
+                resolved[name] = self._apply_config_safeguard({"name": name}).get("name", name)
+            return resolved[name]
+
+        logged: set[tuple[str, str]] = set()
+        if not force:
+            for record in self._read_journal():
+                if record.get("date") != date_str:
+                    continue
+                meal_name = record.get("meal_name", "")
+                for item in record.get("items", []):
+                    logged.add((meal_name, item.get("name", "")))
+
+        plan = plan_daily_supplements(
+            routines,
+            resolve=resolve,
+            include_workout=include_workout,
+            skip=skip,
+            logged=logged,
+            force=force,
+        )
+        segments = plan["segments"]
+        total = sum(len(segment["items"]) for segment in segments)
+
+        if dry_run:
+            lines = [f"🔍 预览（未写入）{date_str}：{total} 条"]
+            for segment in segments:
+                label = _MEAL_LABEL[segment["meal_type"]]
+                names = "、".join(item["name"] for item in segment["items"])
+                lines.append(f"- {label}：{names}")
+        else:
+            lines = [f"✅ 全天补剂已写入 {date_str}：{total} 条"]
+            failures = 0
+            for segment in segments:
+                label = _MEAL_LABEL[segment["meal_type"]]
+                names = "、".join(item["name"] for item in segment["items"])
+                try:
+                    result = self.record_nutrition(date_str, segment["meal_type"], segment["items"])
+                    lines.append(f"- {label}：{names}（{result.get('count', len(segment['items']))} 条）")
+                    for warning in result.get("warnings", []) or []:
+                        lines.append(f"  {warning}")
+                except Exception as exc:
+                    failures += 1
+                    lines.append(f"- {label}：❌ {exc}")
+            if failures:
+                lines.append(f"⚠️ {failures} 段写入失败；重跑本命令时会跳过已成功的段。")
+
+        if total == 0:
+            lines.append("今天没有需要新写入的条目（都已记录或已跳过）。")
+        if plan["skipped_by_user"]:
+            lines.append(f"跳过（你指定）：{'、'.join(plan['skipped_by_user'])}")
+        if plan["skipped_logged"]:
+            lines.append(f"跳过（今天已记）：{'、'.join(plan['skipped_logged'])}")
+        return "\n".join(lines)
+
     def _read_journal(self) -> list[dict[str, Any]]:
         """读取本地日志；文件缺失或损坏时返回空列表（调用方按「无记录」处理）。"""
         if not os.path.exists(self.JOURNAL_FILE):
@@ -1630,6 +1701,73 @@ def _meal_time_warnings(date_str: str, meal_type: str) -> list[str]:
         )
     return warnings
 
+# 全天补剂 = 这四段，顺序即为写入顺序
+DAILY_SUPPLEMENT_SEGMENTS: tuple[tuple[str, str], ...] = (
+    ("morning_stack", "breakfast"),
+    ("dinner_stack", "dinner"),
+    ("night_stack", "snack"),
+    ("workout_stack", "snack"),
+)
+_MEAL_DISPLAY = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
+_MEAL_LABEL = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
+
+
+def plan_daily_supplements(
+    routines: dict[str, Any],
+    *,
+    resolve: Callable[[str], str],
+    include_workout: bool = False,
+    skip: list[str] | None = None,
+    logged: set[tuple[str, str]] | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """把一日的补剂拆成「按餐次写入」的计划（纯函数，不做任何 IO）。
+
+    Args:
+        routines: 配置里的 routines 节点。
+        resolve: 把口语名解析成最终写入名（用于和 journal 比对）。
+        include_workout: 是否追加训练包（含乳清/牛奶，容易和练后正餐重复）。
+        skip: 名称片段，命中即跳过（如 ["D3"] 跳过 D3+K2）。
+        logged: 当日已写入的 (meal_name, 食物名) 集合；按餐次隔离，
+            所以早餐鱼油不会影响晚餐鱼油。
+        force: True 时忽略 logged（强制重复写入）。
+    """
+    tokens = [token.strip().lower() for token in (skip or []) if token.strip()]
+    already = set() if force else (logged or set())
+    segments: list[dict[str, Any]] = []
+    skipped_by_user: list[str] = []
+    skipped_logged: list[str] = []
+
+    for routine_key, meal_type in DAILY_SUPPLEMENT_SEGMENTS:
+        if routine_key == "workout_stack" and not include_workout:
+            continue
+        routine = routines.get(routine_key)
+        if not routine:
+            continue
+
+        meal_name = _MEAL_DISPLAY[meal_type]
+        kept: list[dict[str, Any]] = []
+        for item in routine.get("items", []):
+            final_name = resolve(item["name"])
+            searchable = f"{item['name']} {final_name}".lower()
+            if any(token in searchable for token in tokens):
+                skipped_by_user.append(item["name"])
+                continue
+            if (meal_name, final_name) in already:
+                skipped_logged.append(item["name"])
+                continue
+            kept.append(item)
+
+        if kept:
+            segments.append({"routine": routine_key, "meal_type": meal_type, "items": kept})
+
+    return {
+        "segments": segments,
+        "skipped_by_user": skipped_by_user,
+        "skipped_logged": skipped_logged,
+    }
+
+
 @mcp.tool()
 def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
     """
@@ -1677,6 +1815,48 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
             output += "\n\n" + "\n".join(time_warnings)
         return output
     except Exception as exc:
+        return f"错误: {exc}"
+
+@mcp.tool()
+def record_daily_supplements(
+    date: str,
+    include_workout: bool = False,
+    skip: list[str] | None = None,
+    dry_run: bool = False,
+    force: bool = False,
+) -> str:
+    """
+    Record the whole day's supplements in one call, split by meal.
+    一次调用记完全天补剂，自动按餐次拆开写入。
+
+    分段规则（顺序固定）:
+      晨补 → breakfast、晚餐补剂 → dinner、睡前补剂 → snack；
+      include_workout=True 时追加训练包 → snack。
+
+    幂等: 写入前比对本地 journal，**同一餐次**下已存在的同名条目自动跳过
+    （早餐鱼油不会挡住晚餐鱼油）；需要重复记录时传 force=True。
+
+    Args:
+        date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
+        include_workout (bool): Also write the workout stack (beetroot + whey +
+            milk + creatine). Off by default — it overlaps with a real
+            post-workout meal. | 是否追加训练包，默认不记。
+        skip (list[str] | None): Name fragments to skip, e.g. ["D3"] on a
+            D3-off day, ["锌镁"] on a rest day. | 要跳过的名称片段。
+        dry_run (bool): Only print what would be written. | 只预览不写入。
+        force (bool): Ignore the journal and write again. | 忽略已记录检查。
+    """
+    try:
+        mfp = get_adapter()
+        return mfp.record_daily_supplements(
+            date,
+            include_workout=include_workout,
+            skip=skip,
+            dry_run=dry_run,
+            force=force,
+        )
+    except Exception as exc:
+        logger.error("全天补剂记录失败: {}", exc)
         return f"错误: {exc}"
 
 @mcp.tool()
