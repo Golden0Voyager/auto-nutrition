@@ -348,6 +348,126 @@ class TestComboExpansion:
         assert result["count"] == 1
 
 
+class TestComboDeclaredValues:
+    """组合/套餐自带的数值是用户手写定稿：配置层不得悄悄改写，只允许告警。
+
+    这是 P0 修复的回归防线 —— 修复前 `煎蛋 180 kcal` 会被配置层的
+    `Fried Egg 90 kcal` 覆盖，且没有任何提示。
+    """
+
+    def _adapter(self, adapter_with_config):
+        adapter_with_config._config["common_foods"]["fried_egg"] = {
+            "name": "Fried Egg",
+            "calories": 90,
+            "macros": {"protein": 6.3, "carbs": 0.6, "fat": 7.0},
+            "aliases": ["煎蛋"],
+        }
+        return adapter_with_config
+
+    def _breakfast_combo(self, adapter, items):
+        adapter._config["meal_combos"] = {
+            "my_breakfast": {"name": "我的早餐", "aliases": ["早餐组合"], "items": items},
+        }
+
+    def test_declared_calories_beat_config(self, adapter_with_config):
+        adapter = self._adapter(adapter_with_config)
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        self._breakfast_combo(adapter, [
+            {"name": "Fried Egg (煎鸡蛋)", "calories": 180,
+             "macros": {"protein": 12.6, "carbs": 1.2, "fat": 14.0}},
+        ])
+
+        result = adapter.record_nutrition("2026-01-01", "breakfast", [{"name": "早餐组合"}])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 180
+        assert written["macros"]["protein"] == 12.6
+        assert written["name"] == "Fried Egg (煎鸡蛋)"  # 保留用户写的名字
+        assert result["count"] == 1
+        # 冲突必须告警，但不能覆盖
+        assert any("套餐声明值 180" in w and "90" in w for w in result["warnings"])
+
+    def test_ratio_scales_declared_value_without_false_conflict(self, adapter_with_config):
+        """2 份套餐：声明值与配置同比放大，不应误报冲突。"""
+        adapter = self._adapter(adapter_with_config)
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        self._breakfast_combo(adapter, [
+            # 声明值与配置一致（90），乘 2 份后两边都是 180
+            {"name": "Fried Egg (煎鸡蛋)", "calories": 90,
+             "macros": {"protein": 6.3, "carbs": 0.6, "fat": 7.0}},
+        ])
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "breakfast", [{"name": "早餐组合", "serving_ratio": 2}]
+        )
+
+        assert adapter._create_custom_food.call_args[0][0]["calories"] == 180
+        assert "warnings" not in result
+
+    def test_zero_declared_falls_back_to_config(self, adapter_with_config):
+        """声明 0 kcal 视为「未填」，仍按配置兜底。"""
+        adapter = adapter_with_config
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        self._breakfast_combo(adapter, [
+            {"name": "Apple", "calories": 0, "macros": {}},
+        ])
+
+        result = adapter.record_nutrition("2026-01-01", "breakfast", [{"name": "早餐组合"}])
+
+        assert adapter._create_custom_food.call_args[0][0]["calories"] == 95
+        assert "warnings" not in result
+
+    def test_declared_kept_when_config_has_no_match(self, adapter_with_config):
+        """配置里没有的条目，声明值原样写入，不产生冲突告警。"""
+        adapter = adapter_with_config
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        self._breakfast_combo(adapter, [
+            {"name": "Paella (西班牙海鲜饭)", "calories": 500,
+             "macros": {"protein": 25, "carbs": 60, "fat": 18}},
+        ])
+
+        result = adapter.record_nutrition("2026-01-01", "breakfast", [{"name": "早餐组合"}])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 500
+        assert written["macros"]["protein"] == 25
+        assert "warnings" not in result
+
+    def test_config_matched_zero_calorie_is_not_flagged_unmatched(self, adapter_with_config):
+        """配置命中且配置值本就是 0 kcal（胶囊类补剂），不应报「未匹配」。"""
+        adapter = adapter_with_config
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter._config["supplements"]["coq10"] = {
+            "name": "CoQ10",
+            "calories": 0,
+            "macros": {"fat": 0},
+            "aliases": ["辅酶Q10"],
+        }
+
+        result = adapter.record_nutrition("2026-01-01", "breakfast", [{"name": "辅酶Q10"}])
+
+        assert result["count"] == 1
+        assert "warnings" not in result
+
+    def test_direct_dict_input_still_uses_ai_fallback(self, adapter_with_config):
+        """非套餐路径不变：直接传 dict 仍按 L3 估算兜底，配置优先。"""
+        adapter = self._adapter(adapter_with_config)
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+
+        adapter.record_nutrition(
+            "2026-01-01", "breakfast",
+            [{"name": "煎蛋", "calories": 180}],
+        )
+
+        assert adapter._create_custom_food.call_args[0][0]["calories"] == 90
+
+
 class TestRecordNutritionEdgeCases:
     def test_empty_items(self, adapter):
         mock_create_food(adapter)
