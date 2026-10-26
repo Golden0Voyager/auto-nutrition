@@ -25,7 +25,6 @@ ROUTINES = {
             _item("辅酶Q10"),
             _item("B族维生素"),
             {**_item("鱼油", 20.0, fat=2.2), "serving_ratio": 2},
-            _item("D3+K2"),
         ],
     },
     "dinner_stack": {
@@ -46,6 +45,11 @@ ROUTINES = {
             _item("Whey Protein", 120.0, protein=24, carbs=3, fat=1.5),
             _item("肌酸"),
         ],
+    },
+    "d3_k2_stack": {
+        "name": "D3+K2 隔天",
+        "aliases": ["D3+K2隔天"],
+        "items": [_item("D3+K2")],
     },
 }
 
@@ -71,11 +75,11 @@ class TestPlanDailySupplements:
         assert plan["segments"][-1]["meal_type"] == "snack"
 
     def test_skip_token_drops_only_the_matching_item(self):
-        plan = _plan(skip=["D3"])
+        plan = _plan(skip=["B族"])
 
         names = [item["name"] for item in plan["segments"][0]["items"]]
-        assert names == ["辅酶Q10", "B族维生素", "鱼油"]
-        assert plan["skipped_by_user"] == ["D3+K2"]
+        assert names == ["辅酶Q10", "鱼油"]
+        assert plan["skipped_by_user"] == ["B族维生素"]
 
     def test_skip_removes_a_segment_that_loses_all_items(self):
         plan = _plan(skip=["锌镁"])
@@ -186,8 +190,8 @@ class TestRecordDailySupplements:
 
         calls = adapter.record_nutrition.call_args_list
         assert [c.args[1] for c in calls] == ["breakfast", "dinner", "snack"]
-        assert [len(c.args[2]) for c in calls] == [4, 2, 1]
-        assert "7 条" in output
+        assert [len(c.args[2]) for c in calls] == [3, 2, 1]
+        assert "6 条" in output
 
     def test_include_workout_writes_a_fourth_segment(self, adapter):
         adapter.record_daily_supplements("2026-10-24", include_workout=True)
@@ -212,10 +216,10 @@ class TestRecordDailySupplements:
         assert adapter.record_nutrition.call_count == 3
 
     def test_skip_reaches_the_per_segment_call(self, adapter):
-        output = adapter.record_daily_supplements("2026-10-24", skip=["D3"])
+        output = adapter.record_daily_supplements("2026-10-24", skip=["B族"])
 
         morning_items = adapter.record_nutrition.call_args_list[0].args[2]
-        assert "D3+K2" not in [item["name"] for item in morning_items]
+        assert "B族维生素" not in [item["name"] for item in morning_items]
         assert "跳过" in output
 
     def test_missing_routine_is_skipped(self, adapter):
@@ -246,7 +250,7 @@ class TestRecordDailySupplements:
 
         adapter.record_daily_supplements("2026-10-24")
 
-        assert len(adapter.record_nutrition.call_args_list[0].args[2]) == 4
+        assert len(adapter.record_nutrition.call_args_list[0].args[2]) == 3
 
     def test_segment_warnings_are_surfaced(self, adapter):
         adapter.record_nutrition = MagicMock(
@@ -335,6 +339,9 @@ class TestResolveSegments:
             (["night"], {"night_stack"}),
             (["workout"], {"workout_stack"}),
             (["night_stack"], {"night_stack"}),
+            (["d3"], {"d3_k2_stack"}),
+            (["d3k2"], {"d3_k2_stack"}),
+            (["d3_k2_stack"], {"d3_k2_stack"}),
             (["Morning", " DINNER "], {"morning_stack", "dinner_stack"}),
         ],
     )
@@ -355,6 +362,31 @@ class TestResolveSegments:
         assert error is not None
         assert "mornin" in error
         assert "morning" in error
+
+
+class TestExtraSegments:
+    """EXTRA 段（隔天补剂，如 D3+K2）只能显式点名，绝不进全天组合。
+
+    晨补的定时任务每天都跑；D3+K2 混进标准段就会天天记一遍，
+    journal 的维生素 D 摄入凭空翻倍。
+    """
+
+    def test_extra_segment_is_not_in_the_full_day_plan(self):
+        plan = _plan()
+
+        assert "d3_k2_stack" not in [s["routine"] for s in plan["segments"]]
+
+    def test_extra_segment_is_written_when_named(self):
+        plan = _plan(only={"d3_k2_stack"})
+
+        assert [(s["routine"], s["meal_type"]) for s in plan["segments"]] == [
+            ("d3_k2_stack", "breakfast")
+        ]
+
+    def test_extra_segment_can_be_combined_with_standard_ones(self):
+        plan = _plan(only={"morning_stack", "d3_k2_stack"})
+
+        assert [s["routine"] for s in plan["segments"]] == ["morning_stack", "d3_k2_stack"]
 
 
 class TestPlanOnlySegments:
@@ -462,6 +494,21 @@ class TestSegmentScopedWrite:
         assert "睡前补剂" in output
         assert "1 条" in output
         adapter.record_nutrition.assert_not_called()
+
+    def test_d3_segment_writes_breakfast_only(self, adapter):
+        output = adapter.record_daily_supplements("2026-10-24", segments=["d3"])
+
+        assert adapter.record_nutrition.call_count == 1
+        assert adapter.record_nutrition.call_args.args[1] == "breakfast"
+        names = [item["name"] for item in adapter.record_nutrition.call_args.args[2]]
+        assert names == ["D3+K2"]
+        assert "D3+K2" in output
+
+    def test_morning_segment_no_longer_carries_d3(self, adapter):
+        adapter.record_daily_supplements("2026-10-24", segments=["morning"])
+
+        names = [item["name"] for item in adapter.record_nutrition.call_args.args[2]]
+        assert "D3+K2" not in names
 
 
 class TestToolWrapper:

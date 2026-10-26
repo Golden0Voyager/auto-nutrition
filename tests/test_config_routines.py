@@ -8,6 +8,8 @@ from pathlib import Path
 
 import yaml
 
+import mfp_adapter
+
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "supplements_config.yaml"
 
 
@@ -21,7 +23,30 @@ def test_routine_keys():
         "dinner_stack",
         "night_stack",
         "workout_stack",
+        "d3_k2_stack",
     }
+
+
+def test_d3_k2_lives_in_its_own_every_other_day_segment():
+    """D3+K2 隔天 1 粒，绝不能混进晨补。
+
+    晨补的定时任务每天都跑，把它放在 morning_stack 里就会天天记一遍，
+    journal 的维生素 D 摄入凭空翻倍。所以它单独成段，且**不在**
+    DAILY_SUPPLEMENT_SEGMENTS 里——「全天补剂」不会写它，只有
+    segments=["d3"] 显式点名才写。
+    """
+    routines = _routines()
+    morning_names = [item["name"] for item in routines["morning_stack"]["items"]]
+
+    assert "D3+K2" not in morning_names
+    assert [item["name"] for item in routines["d3_k2_stack"]["items"]] == ["D3+K2"]
+    all_names = [item["name"] for conf in routines.values() for item in conf["items"]]
+    assert all_names.count("D3+K2") == 1
+
+    standard_keys = {key for key, _ in mfp_adapter.DAILY_SUPPLEMENT_SEGMENTS}
+    extra_keys = {key for key, _ in mfp_adapter.EXTRA_SUPPLEMENT_SEGMENTS}
+    assert "d3_k2_stack" not in standard_keys
+    assert "d3_k2_stack" in extra_keys
 
 
 def test_workout_stack_contains_pre_and_post_items():

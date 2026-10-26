@@ -320,9 +320,9 @@ routines:
       - { name: "辅酶Q10", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
       - { name: "B族维生素", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
       - { name: "鱼油", calories: 10, macros: { carbs: 0, protein: 0, fat: 1.1 } }
-      - { name: "D3+K2", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
-    # 鱼油早餐 1 粒（2026-10-26 从 2 粒下调，全天合计 600mg EPA+DHA）；
-    # D3+K2 为隔天 1 粒（天天调用晨补会多记一天，按需删）
+    # 鱼油早餐 1 粒（2026-10-26 从 2 粒下调，全天合计 600mg EPA+DHA）。
+    # D3+K2 已移出本段（2026-10-26）——它是隔天 1 粒，放进晨补会被每天多记一遍。
+    # 现在走独立的 d3_k2_stack 段，由一条隔天的定时任务显式点名写入。
 
   dinner_stack:
     name: "晚餐补剂 (Dinner Stack)"
@@ -352,6 +352,15 @@ routines:
     # 一次调用记全 3 项：甜菜根在练前 2-2.5h，乳清/牛奶在练后 30min。
     # 一天只调一次；分两次记会重复记账。
     # 肌酸已移到 dinner_stack（每日恒量，不该跟训练日绑定）。
+
+  d3_k2_stack:
+    name: "D3+K2 隔天 (D3+K2 Every Other Day)"
+    aliases: ["D3+K2隔天", "隔天D3", "隔天D3+K2"]
+    items:
+      - { name: "D3+K2", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+    # 隔天 1 粒（D3 5000IU / K2 100mcg，日均 2500IU），随含脂早餐。
+    # 本段**不在** DAILY_SUPPLEMENT_SEGMENTS 里，所以「全天补剂」不会写它——
+    # 只能显式 segments=["d3"] 点名。由一条 INTERVAL=2 的定时任务调用。
 
 meal_combos:
   daily_standard_breakfast:
