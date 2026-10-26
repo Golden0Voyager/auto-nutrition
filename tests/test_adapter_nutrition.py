@@ -388,6 +388,32 @@ class TestComboDeclaredValues:
         # 冲突必须告警，但不能覆盖
         assert any("套餐声明值 180" in w and "90" in w for w in result["warnings"])
 
+    def test_longer_config_name_wins_over_a_short_declared_alias(self, adapter_with_config):
+        """配置里的正式产品名比组合里的简称更完整时，用配置名。
+
+        回归：routines 里写的是「鱼油」，配置里是
+        「Fish Oil (Swisse 无腥味野生鱼油 1粒 - EPA 180 / DHA 120)」。
+        Level 0 无条件保留原名会让 MFP 里只剩「鱼油」，看不出几粒、什么产品。
+        """
+        adapter = adapter_with_config
+        adapter._config["common_foods"]["fish_oil"] = {
+            "name": "Fish Oil (Swisse 无腥味野生鱼油 1粒 - EPA 180 / DHA 120)",
+            "calories": 10,
+            "macros": {"fat": 1.1},
+            "aliases": ["鱼油"],
+        }
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        self._breakfast_combo(adapter, [
+            {"name": "鱼油", "calories": 10, "macros": {"fat": 1.1}},
+        ])
+
+        adapter.record_nutrition("2026-01-01", "breakfast", [{"name": "早餐组合"}])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["name"] == "Fish Oil (Swisse 无腥味野生鱼油 1粒 - EPA 180 / DHA 120)"
+        assert written["calories"] == 10
+
     def test_ratio_scales_declared_value_without_false_conflict(self, adapter_with_config):
         """2 份套餐：声明值与配置同比放大，不应误报冲突。"""
         adapter = self._adapter(adapter_with_config)
