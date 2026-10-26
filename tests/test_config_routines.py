@@ -27,11 +27,25 @@ def test_routine_keys():
 def test_workout_stack_contains_pre_and_post_items():
     names = [item["name"] for item in _routines()["workout_stack"]["items"]]
 
-    assert len(names) == 4
+    assert len(names) == 3
     assert "甜菜根粉" in names  # 练前 2-2.5h
-    assert "肌酸" in names  # 练后 30min
     assert any(name.startswith("Whey Protein") for name in names)
     assert any(name.startswith("Milk") for name in names)
+    assert "肌酸" not in names  # 每日恒量，已移到 dinner_stack
+
+
+def test_creatine_sits_in_dinner_stack():
+    """肌酸是每日 3g 恒量，必须落在每天都跑的晚餐段，且只能出现一次。
+
+    放在 workout_stack 时，训练日会在 Snacks 再记一次，而幂等键是
+    (餐次, 名称)，与午餐/晚餐的键永不相等，跨餐次重复检测不到。
+    """
+    routines = _routines()
+    dinner_names = [item["name"] for item in routines["dinner_stack"]["items"]]
+
+    assert "肌酸" in dinner_names
+    all_names = [item["name"] for conf in routines.values() for item in conf["items"]]
+    assert all_names.count("肌酸") == 1
 
 
 def test_legacy_aliases_removed():
