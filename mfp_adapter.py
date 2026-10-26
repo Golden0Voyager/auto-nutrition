@@ -84,6 +84,60 @@ class SessionExpiredError(Exception):
     """当 MyFitnessPal 会话过期或无效时抛出"""
     pass
 
+
+# 中文 → 英文食物词表：USDA 的 FTS5 只索引英文描述，中文查询必然零命中。
+# 这里做「查询改写」而不是「翻译服务」：能对上就用英文去搜，对不上就明确报错，
+# 绝不静默返回 0 kcal。词表按最长优先替换，所以「鸡胸肉」不会被「鸡肉」抢走。
+CN_EN_FOOD_LEXICON: dict[str, str] = {
+    # 主食 / 谷物
+    "燕麦片": "Oats", "燕麦": "Oats", "糙米": "Brown rice", "白米饭": "White rice",
+    "米饭": "Rice", "大米": "Rice", "面条": "Noodles", "意大利面": "Pasta",
+    "全麦面包": "Whole wheat bread", "面包": "Bread", "吐司": "Toast",
+    "贝果": "Bagel", "馒头": "Steamed bun", "饺子": "Dumpling", "包子": "Baozi",
+    "土豆": "Potato", "红薯": "Sweet potato", "紫薯": "Purple sweet potato",
+    "玉米": "Corn", "藜麦": "Quinoa", "小米": "Millet", "荞麦": "Buckwheat",
+    # 蛋白质
+    "鸡胸肉": "Chicken breast", "鸡腿": "Chicken thigh", "鸡肉": "Chicken",
+    "牛肉": "Beef", "牛排": "Beef steak", "猪肉": "Pork", "羊肉": "Lamb",
+    "鸡蛋": "Egg", "蛋清": "Egg white", "蛋黄": "Egg yolk",
+    "三文鱼": "Salmon", "金枪鱼": "Tuna", "鳕鱼": "Cod", "虾仁": "Shrimp",
+    "虾": "Shrimp", "蟹": "Crab", "豆腐": "Tofu", "豆浆": "Soy milk",
+    "牛奶": "Milk", "酸奶": "Yogurt", "奶酪": "Cheese", "黄油": "Butter",
+    "乳清蛋白": "Whey protein", "蛋白粉": "Whey protein",
+    # 蔬果
+    "苹果": "Apple", "香蕉": "Banana", "橙子": "Orange", "橘子": "Tangerine",
+    "蓝莓": "Blueberry", "草莓": "Strawberry", "葡萄": "Grape", "西瓜": "Watermelon",
+    "牛油果": "Avocado", "西红柿": "Tomato", "番茄": "Tomato",
+    "菠菜": "Spinach", "生菜": "Lettuce", "西兰花": "Broccoli", "花椰菜": "Broccoli",
+    "胡萝卜": "Carrot", "黄瓜": "Cucumber", "洋葱": "Onion", "蘑菇": "Mushroom",
+    "南瓜": "Pumpkin", "茄子": "Eggplant", "青椒": "Green pepper",
+    "白菜": "Chinese cabbage", "芹菜": "Celery", "芦笋": "Asparagus",
+    # 坚果 / 油脂 / 调味
+    "花生": "Peanut", "杏仁": "Almond", "核桃": "Walnut", "腰果": "Cashew",
+    "橄榄油": "Olive oil", "蜂蜜": "Honey", "白糖": "Sugar",
+    "黑巧克力": "Dark chocolate", "巧克力": "Chocolate",
+}
+
+# 按长度倒序，保证「鸡胸肉」先于「鸡肉」被替换
+_CN_EN_KEYS_BY_LENGTH: tuple[str, ...] = tuple(sorted(CN_EN_FOOD_LEXICON, key=len, reverse=True))
+
+
+def _translate_food_query(query: str) -> tuple[str, bool]:
+    """把中文食物名改写成英文查询词。
+
+    返回 ``(改写后的字符串, 是否至少命中一个词条)``。未收录的汉字原样留下，
+    后续 ``re.findall(r'[a-zA-Z]+')`` 会自然丢弃它们，所以「香煎三文鱼」→
+    ``香煎 Salmon`` → 只用 ``Salmon`` 去搜，这正是想要的效果。
+    """
+    translated = query
+    hit = False
+    for cn in _CN_EN_KEYS_BY_LENGTH:
+        if cn in translated:
+            translated = translated.replace(cn, f" {CN_EN_FOOD_LEXICON[cn]} ")
+            hit = True
+    return translated, hit
+
+
 class USDALocalResolver:
     """Local USDA database query engine with full nutrient support.
 
@@ -126,32 +180,29 @@ class USDALocalResolver:
         "vitamin_d": 20.0,   # mcg
     }
 
-    # Language guard hints for common non-English food names
-    LANG_GUARD_HINTS = {
-        "苹果": "Apple", "鸡蛋": "Egg", "牛肉": "Beef", "鸡胸肉": "Chicken Breast",
-        "三文鱼": "Salmon", "糙米": "Brown Rice", "菠菜": "Spinach", "牛油果": "Avocado",
-        "花椰菜": "Broccoli", "全麦面包": "Whole Wheat Bread", "猪肉": "Pork",
-        "燕麦": "Oats", "香蕉": "Banana", "西红柿": "Tomato",
-    }
-
     def search(self, query: str, page_size: int = 3) -> list[dict[str, Any]]:
         """Full-text search with complete nutrient profiles.
 
         Returns per-100g data. The caller should multiply by serving_ratio.
-        IMPORTANT: query MUST be in English for FTS5 to work.
+        IMPORTANT: query MUST be in English for FTS5 to work. Chinese names are
+        rewritten through ``CN_EN_FOOD_LEXICON`` before searching.
         """
-        # Language guard
-        has_non_ascii = any(ord(c) > 127 for c in query)
-        if has_non_ascii:
-            hint = next(
-                (eng for cn, eng in self.LANG_GUARD_HINTS.items() if cn in query),
-                None,
-            )
-            hint_msg = f" Suggested: '{hint}'" if hint else " Please translate to English."
+        # Language guard：FTS5 只索引英文描述，中文查询先按词表改写成英文
+        if any(ord(c) > 127 for c in query):
+            translated, hit = _translate_food_query(query)
+            if not hit:
+                logger.warning(
+                    "[USDA Language Guard] 查询 '{}' 含非英文字符且词表未收录，"
+                    "FTS5 无法检索 —— 请改用英文食物名（如 'Oats' / 'Chicken breast'）。",
+                    query,
+                )
+                return []
             logger.warning(
-                "[USDA Language Guard] Non-English query: '{}' -- FTS5 requires English!{}",
-                query, hint_msg,
+                "[USDA Language Guard] 中文查询 '{}' 已按词表改写为 '{}'，"
+                "结果可能不如直接写英文名精确。",
+                query, translated.strip(),
             )
+            query = translated
 
         if not self.DB_PATH.exists():
             logger.warning("Local USDA database not found, skipping Level 2.")
@@ -165,7 +216,8 @@ class USDALocalResolver:
             # 清洗查询：只保留英文单词（去掉数字、中文、括号等干扰项），提高 FTS 命中率
             # 使用 AND 组合确保每个关键词都命中（FTS5 默认 OR，多词时 AND 更精准）
             # 同时处理单复数：对每个词额外生成复数/单数形式，组内用 OR 连接
-            english_words = re.findall(r'[a-zA-Z]+', query)
+            # 单字母（如 "100g" 里的 g）不是有效食物词，留着会让 AND 查询全灭
+            english_words = [w for w in re.findall(r'[a-zA-Z]+', query) if len(w) > 1]
             if not english_words:
                 logger.warning("[USDA] 清洗后无有效英文关键词: '{}'", query)
                 conn.close()
@@ -368,6 +420,72 @@ class USDALocalResolver:
 
 
 
+
+
+_SIZE_SPEC_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(ml|kg|oz|g|l)(?![a-zA-Z])")
+
+
+def _size_spec(text: str) -> tuple[float, str] | None:
+    """提取名称里第一个体积/重量规格，归一化成 (数值, 'ml' | 'g' | 'oz')。
+
+    只认体积/质量单位，不认「片/粒/份/勺」这类计数单位——计数由
+    ``serving_ratio`` 负责，混进来会把「2 片」误判成规格冲突。
+    """
+    match = _SIZE_SPEC_RE.search(text.lower())
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2)
+    if unit == "l":
+        return value * 1000, "ml"
+    if unit == "kg":
+        return value * 1000, "g"
+    return value, unit
+
+
+def _size_scale(
+    item_name: str, conf_name: str, display_qty: str | None = None
+) -> tuple[float, bool] | None:
+    """按规格折算配置值。
+
+    返回 ``(比例, 是否真的按规格算过)``；``None`` 表示单位不可比（视为不匹配）。
+
+    - 两侧都没有规格 → ``(1.0, False)``，表示「没有规格信息」，沿用 ``serving_ratio``
+    - 两侧规格同单位 → ``(item / conf, True)``，例如 250ml 对 300ml 条目得 5/6
+    - 单位不同（ml 对 g）→ ``None``，无法换算，宁可交给下游也不乱套
+
+    ``display_qty`` 是 ``_parse_quantity`` 从名字里剥出来的原始份量
+    （``250ml 牛奶`` → ``"250ml"``）；名字里没有规格时用它兜底，
+    否则「250ml 牛奶」会因为名字只剩「牛奶」而被当成 2.5 份 = 450 kcal。
+    """
+    item_size = _size_spec(item_name) or _size_spec(display_qty or "")
+    conf_size = _size_spec(conf_name)
+    if item_size is None or conf_size is None:
+        return (1.0, False)
+    if item_size[1] != conf_size[1]:
+        return None
+    return (item_size[0] / conf_size[0], True)
+
+
+_ENTRY_BRAND_PREFIX = "auto_nutrition - "
+_ENTRY_SERVING_SUFFIX_RE = re.compile(r",\s*\d+(?:\.\d+)?\s*servings?\s*(?:\(s\))?\s*$", re.IGNORECASE)
+
+
+def _normalize_entry_name(name: str) -> str:
+    """把 MFP 网页端显示的条目名还原成 journal 里的裸名字。
+
+    ``_create_custom_food`` 把 brand_name 写成 ``Auto_Nutrition``，网页日记
+    因此显示成::
+
+        Auto_Nutrition - Whey Protein, 1 serving(s)
+
+    而 journal 存的是 ``Whey Protein``。过去直接 ``==`` 比对，恒失配——删除后
+    journal 留脏数据，``get_nutrition_trends`` 虚高。
+    """
+    text = (name or "").strip()
+    if text.lower().startswith(_ENTRY_BRAND_PREFIX):
+        text = text[len(_ENTRY_BRAND_PREFIX):].strip()
+    return _ENTRY_SERVING_SUFFIX_RE.sub("", text).strip()
 
 
 class MFPAdapter:
@@ -722,64 +840,80 @@ class MFPAdapter:
         response.raise_for_status()
         return response.status_code in (200, 204)
 
-    def _apply_config_safeguard(self, item: dict[str, Any]) -> dict[str, Any]:
+    def _match_config(
+        self, name: str, display_qty: str | None = None
+    ) -> tuple[dict[str, Any], tuple[float, bool]] | None:
+        """按别名查找配置条目，返回 ``(配置节点, (规格比例, 是否按规格算过))``。
+
+        匹配规则：
+        - **中文别名**走子串匹配（「一杯全脂牛奶」也能命中）。
+        - **英文别名**必须落在名称开头，否则 ``Yogurt, plain, whole milk``
+          会被 ``milk`` 抢走；尾部用 ``(?!\\w)`` 而非 ``\\b``，因为别名以
+          括号/加号结尾时 ``\\b`` 在串尾不成立。
+        - 规格（ml/g）按比例换算而不是直接拒绝：``Milk (Full Cream, 250ml)``
+          命中 300ml 条目后按 5/6 折算，得到 150 kcal。
+        """
         conf_data = self._load_config()
         if not conf_data:
-            return item
+            return None
 
-        # 合并不同类别的配置数据进行匹配
-        matched_conf = None
-        name_lower = item["name"].lower()
-
-        # 遍历所有可能的单项配置节点进行“模糊+全量”匹配
+        name_lower = name.lower()
         for section in ("supplements", "regional_foods", "common_foods"):
             section_data = conf_data.get(section, {})
             for key, conf in section_data.items():
                 # 别名列表包含：Key 本身, 配置中的 Name, 以及显式定义的 Aliases
                 aliases = {key.lower(), conf.get("name", "").lower()} | {a.lower() for a in conf.get("aliases", [])}
-                aliases.discard("") # 移除空字符串
+                aliases.discard("")  # 移除空字符串
 
                 for alias in aliases:
                     if all(ord(c) < 128 for c in alias):
-                        # 纯英文使用单词边界正则匹配，防止 "Gel" 匹配 "Gelatin"
-                        # 将下划线和空格视为等价，统一为 \s+ 或 [_\s]+ 进行匹配
+                        # 下划线与空格等价，统一按 [\s_]+ 匹配
                         alias_pattern = re.escape(alias).replace('_', r'[\s_]+').replace(r'\ ', r'[\s_]+')
-                        if re.search(r'\b' + alias_pattern + r'\b', name_lower):
-                            matched_conf = conf
-                            break
-                    else:
-                        # 包含中文则使用子字符串匹配
-                        if alias in name_lower:
-                            matched_conf = conf
-                            break
-                if matched_conf:
-                    break
-            if matched_conf:
-                break
+                        if not re.match(alias_pattern + r'(?!\w)', name_lower):
+                            continue
+                    elif alias not in name_lower:
+                        continue
 
-        if matched_conf:
-            ratio = float(item.get("serving_ratio", 1.0))
-            safe_item = item.copy()
-            # 如果配置中有正式名称，则使用配置名称，否则保持用户输入
-            official_name = matched_conf.get("name", item["name"])
+                    size = _size_scale(name_lower, conf.get("name", ""), display_qty)
+                    if size is None:
+                        continue
+                    return conf, size
+        return None
 
-            # 核心优化：如果匹配到配置，则强制执行数值校准，防止大模型幻觉
-            safe_item["name"] = f"{official_name}"
-            safe_item["calories"] = round(matched_conf.get("calories", 0) * ratio, 1)
+    def _apply_config_safeguard(self, item: dict[str, Any]) -> dict[str, Any]:
+        match = self._match_config(item["name"], item.get("display_qty"))
+        if match is None:
+            return item
 
-            # 合并宏量和微量元素
-            combined_nutrients = matched_conf.get("macros", {}).copy()
-            if "micros" in matched_conf:
-                combined_nutrients.update(matched_conf["micros"])
+        matched_conf, (size_ratio, spec_applied) = match
+        ratio = float(item.get("serving_ratio", 1.0))
+        # 如果配置中有正式名称，则使用配置名称，否则保持用户输入
+        official_name = matched_conf.get("name", item["name"])
+        if spec_applied:
+            # 规格已明确（250ml / 15g 这类），用它当分母重算，
+            # 不能再套 per-100g 语义的 serving_ratio（否则 250ml 牛奶 = 450 kcal）。
+            ratio = size_ratio
+            if abs(size_ratio - 1.0) > 1e-9:
+                # 规格真的被换算过，保留用户原本的规格名，
+                # 避免出现「写着 300ml 却只有 150 kcal」这种自相矛盾的条目。
+                official_name = item["name"]
 
-            safe_item["macros"] = {
-                k: round(v * ratio, 1) for k, v in combined_nutrients.items()
-            }
-            logger.info("应用配置保护: {} -> {}", item["name"], safe_item["name"])
-            safe_item["_config_matched"] = True
-            return safe_item
+        safe_item = item.copy()
+        # 核心优化：如果匹配到配置，则强制执行数值校准，防止大模型幻觉
+        safe_item["name"] = f"{official_name}"
+        safe_item["calories"] = round(matched_conf.get("calories", 0) * ratio, 1)
 
-        return item
+        # 合并宏量和微量元素
+        combined_nutrients = matched_conf.get("macros", {}).copy()
+        if "micros" in matched_conf:
+            combined_nutrients.update(matched_conf["micros"])
+
+        safe_item["macros"] = {
+            k: round(v * ratio, 1) for k, v in combined_nutrients.items()
+        }
+        logger.info("应用配置保护: {} -> {} (x{})", item["name"], safe_item["name"], round(ratio, 3))
+        safe_item["_config_matched"] = True
+        return safe_item
 
     def _parse_quantity(self, text: str) -> tuple[float, str, str]:
         """Parse quantity, unit, and food name from a string.
@@ -905,11 +1039,23 @@ class MFPAdapter:
                     new_item.setdefault("macros", {})
                     for mk, mv in new_item["micros"].items():
                         new_item["macros"][mk] = round(mv * ratio, 1)
+                # 组合/套餐里的数值是用户手写定稿：打包成 _from_combo 标记，
+                # 由 Level 0 直接采用，配置层只在缺值时才兜底。
+                new_item["_from_combo"] = {
+                    "name": new_item["name"],
+                    "calories": new_item["calories"] or None,
+                    "macros": dict(new_item["macros"]) if new_item.get("macros") else None,
+                    "ratio": ratio,
+                }
                 expanded_items.append(new_item)
 
         results = []
         processed_items = []
         written_items: list[dict[str, Any]] = []
+        # 组合/套餐声明值与本地配置不一致的记录（只告警，不覆盖）
+        config_conflicts: list[dict[str, Any]] = []
+        # 未匹配且名称含中文的条目：USDA 只索引英文，需要提示改英文名重录
+        non_english_misses: list[str] = []
         # 写入前基线：仅用于 5xx/超时后判断「是否已落库」，避免重试造成双计
         diary_snapshot = self._diary_entries_snapshot(date_str)
 
@@ -920,10 +1066,32 @@ class MFPAdapter:
             # 提取 AI 暂存值
             ai_calories = raw_item.pop("ai_calories", None)
             ai_macros = raw_item.pop("ai_macros", None)
+            # 提取组合/套餐声明值（用户手写定稿）
+            declared = raw_item.pop("_from_combo", None)
+            declared_name = raw_item["name"]
 
             # Level 1: 本地配置 (supplements_config.yaml) — 始终执行，优先级最高
             item = self._apply_config_safeguard(raw_item)
             config_matched = item.get("_config_matched", False)
+
+            # Level 0: 组合/套餐声明值 — 用户显式写下的数值优先于系统推算。
+            # 套餐是用户精心设置的，不能被配置层的单项值悄悄改写；
+            # 两者不一致时记一条告警，让用户自己决定改哪一边。
+            if declared and declared["calories"]:
+                ratio = float(declared.get("ratio") or 1.0)
+                config_calories = float(item.get("calories") or 0) * ratio
+                if config_matched and abs(config_calories - float(declared["calories"])) >= 1:
+                    config_conflicts.append({
+                        "name": declared_name,
+                        "declared": float(declared["calories"]),
+                        "config": config_calories,
+                        "config_name": item.get("name", ""),
+                    })
+                item["name"] = declared_name
+                item["calories"] = float(declared["calories"])
+                # 声明值自带 macros 时整份采用；没带就置空，避免把配置的宏量
+                # 按另一个热量口径塞进来（宁可缺，不可错）。
+                item["macros"] = dict(declared["macros"]) if declared["macros"] else {}
 
             # Level 2: USDA 数据库 — 配置未命中时执行
             if not config_matched and (item.get("calories") is None or item.get("calories", 0) == 0):
@@ -953,10 +1121,18 @@ class MFPAdapter:
 
             # Level 4: 兜底 — 所有数据源均未命中，标记警告
             if item.get("calories") is None or item.get("calories", 0) == 0:
-                logger.warning('Level 4 | ⚠️ "{}" 未匹配到任何营养数据，将以 0 kcal 录入', item["name"])
                 item["calories"] = 0
                 item.setdefault("macros", {})
-                item["_unmatched"] = True
+                if config_matched:
+                    # 配置命中且配置值本身就是 0 kcal（胶囊/片剂类补剂很常见），
+                    # 这是正常结果，不是「未匹配」——否则每天都会刷一堆假告警，
+                    # 把真正的未匹配淹掉。
+                    logger.info('Level 4 | "{}" 配置命中且为 0 kcal，按 0 录入', item["name"])
+                else:
+                    logger.warning('Level 4 | ⚠️ "{}" 未匹配到任何营养数据，将以 0 kcal 录入', item["name"])
+                    item["_unmatched"] = True
+                    if any(ord(c) > 127 for c in item["name"]):
+                        non_english_misses.append(item["name"])
             if "macros" not in item:
                 item["macros"] = {}
 
@@ -993,8 +1169,24 @@ class MFPAdapter:
 
         unmatched = [r["name"] for r in results if r.get("unmatched")]
         result = {"status": "ok", "count": len(results)}
+        warnings: list[str] = []
         if unmatched:
-            result["warnings"] = [f'⚠️ 以下食物未匹配到营养数据，以 0 kcal 录入: {", ".join(unmatched)}']
+            warnings.append(f'⚠️ 以下食物未匹配到营养数据，以 0 kcal 录入: {", ".join(unmatched)}')
+        if non_english_misses:
+            warnings.append(
+                f'💡 其中含中文名的 {len(non_english_misses)} 条 USDA 检索不到'
+                f'（中文词表只覆盖常见食材）：请改用英文名重录，'
+                f'如 "Oats" / "Chicken breast" / "Avocado"；'
+                f'或把该食物加到 supplements_config.yaml 作为配置锚点。'
+            )
+        for conflict in config_conflicts:
+            warnings.append(
+                f'ℹ️ 「{conflict["name"]}」按套餐声明值 {conflict["declared"]:g} kcal 记录，'
+                f'本地配置「{conflict["config_name"]}」为 {conflict["config"]:g} kcal。'
+                f'已保留套餐值；若配置才是对的，请更新 supplements_config.yaml 或该套餐。'
+            )
+        if warnings:
+            result["warnings"] = warnings
         return result
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
@@ -1299,7 +1491,14 @@ class MFPAdapter:
 
         只删除最后一个匹配项（同日期 + 同餐次 + 同名字），删空的日志条目整体移除。
         返回实际删除的条数，供调用方提示。
+
+        名字比对前会先剥掉网页端加的品牌前缀与份量后缀（见 ``_normalize_entry_name``），
+        并忽略大小写——否则 ``Auto_Nutrition - Whey Protein, 1 serving(s)`` 永远
+        匹配不上 journal 里的 ``Whey Protein``。
         """
+        target = _normalize_entry_name(item_name).casefold()
+        if not target:
+            return 0
         if not os.path.exists(self.JOURNAL_FILE):
             return 0
         try:
@@ -1314,7 +1513,7 @@ class MFPAdapter:
             if entry.get("date") != date_str or entry.get("meal_name") != meal_name:
                 continue
             for item in reversed(entry.get("items", [])):
-                if item.get("name") == item_name:
+                if _normalize_entry_name(item.get("name", "")).casefold() == target:
                     entry["items"].remove(item)
                     removed = 1
                     break
@@ -1776,6 +1975,10 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
 
     ## Data Source Priority (automatic, no manual intervention needed)
     The system resolves nutrition data in this order:
+      0. Declared values inside a combo/routine (meal_combos / routines) — a combo
+         is hand-calibrated by the user, so its own calories/macros are final.
+         A mismatch against local config is reported as a warning, never silently
+         overwritten.
       1. Local config (supplements_config.yaml) — user-calibrated, highest trust
       2. USDA database (usda_core.db) — standard reference data
       3. AI-provided values (from Dict input) — estimation fallback

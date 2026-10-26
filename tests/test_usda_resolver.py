@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mfp_adapter import USDALocalResolver
+from mfp_adapter import CN_EN_FOOD_LEXICON, USDALocalResolver, _translate_food_query
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -130,9 +130,14 @@ class TestSearch:
         assert len(results) <= 1
 
     def test_search_non_ascii_query(self, resolver):
-        """Non-English query should still work (may return results or empty)."""
+        """中文查询应按词表改写成英文，而不是直接零命中。"""
         results = resolver.search("苹果", page_size=3)
-        assert isinstance(results, list)
+        assert results, "「苹果」应被改写成 Apple 后命中测试库"
+        assert "Apple" in results[0]["name"]
+
+    def test_search_untranslatable_chinese_returns_empty(self, resolver):
+        """词表未收录的中文要明确返回空，不能拿「g」之类的残片去瞎搜。"""
+        assert resolver.search("香煎鹅肝配无花果", page_size=3) == []
 
     def test_search_db_not_exists(self, tmp_path):
         r = USDALocalResolver.__new__(USDALocalResolver)
@@ -296,3 +301,45 @@ class TestDvConversion:
         r.DB_PATH = db_path
         results = r.search("Test Food", page_size=1)
         assert len(results) > 0
+
+
+class TestChineseFoodLexicon:
+    """中文食物名 → 英文查询改写。
+
+    修复前：中文名被语言守卫「警告」后照样往下走，`re.findall` 拿不到英文词，
+    直接返回空 → 记 0 kcal。用户只看到「未匹配」，不知道为什么。
+    """
+
+    def test_known_food_is_rewritten(self):
+        translated, hit = _translate_food_query("鸡胸肉")
+        assert hit is True
+        assert "Chicken breast" in translated
+
+    def test_longest_match_wins(self):
+        """「鸡胸肉」不能被「鸡肉」抢走，否则搜到的是 Chicken 泛词。"""
+        translated, _ = _translate_food_query("鸡胸肉")
+        assert "Chicken breast" in translated
+        assert "Chicken " not in translated.replace("Chicken breast", "")
+
+    def test_mixed_query_keeps_english_part(self):
+        """「香煎三文鱼」里没收录的字原样留下，会被后续正则丢掉。"""
+        translated, hit = _translate_food_query("香煎三文鱼")
+        assert hit is True
+        assert "Salmon" in translated
+
+    def test_unknown_chinese_is_not_translated(self):
+        translated, hit = _translate_food_query("香煎鹅肝配无花果")
+        assert hit is False
+        assert translated == "香煎鹅肝配无花果"
+
+    def test_english_query_untouched(self):
+        translated, hit = _translate_food_query("Chicken breast roasted")
+        assert hit is False
+        assert translated == "Chicken breast roasted"
+
+    def test_lexicon_covers_common_staples(self):
+        """用户日常最容易用中文写的那批，必须都在词表里。"""
+        must_have = ["燕麦", "鸡蛋", "鸡胸肉", "牛肉", "三文鱼", "米饭", "牛奶",
+                     "苹果", "香蕉", "牛油果", "豆腐", "酸奶", "西兰花", "菠菜"]
+        missing = [cn for cn in must_have if cn not in CN_EN_FOOD_LEXICON]
+        assert not missing, f"词表缺少常见食材: {missing}"

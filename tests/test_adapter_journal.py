@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from mfp_adapter import MFPAdapter
+from mfp_adapter import MFPAdapter, _normalize_entry_name
 
 
 @pytest.fixture
@@ -163,3 +163,57 @@ class TestRemoveFromJournal:
 
     def test_missing_journal_file_returns_zero(self, adapter):
         assert adapter._remove_from_journal("2026-10-23", "Breakfast", "Oats") == 0
+
+
+class TestNormalizeEntryName:
+    """网页端条目名 → journal 裸名。
+
+    真实事故：删除肌酸时提示「本地日志无匹配项」，journal 留脏数据，
+    趋势虚高。原因是网页显示 ``Auto_Nutrition - 肌酸, 1 serving(s)``，
+    而 journal 里只有 ``肌酸``，`==` 恒失配。
+    """
+
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            ("Auto_Nutrition - Whey Protein, 1 serving(s)", "Whey Protein"),
+            ("Auto_Nutrition - 肌酸, 1 serving(s)", "肌酸"),
+            ("Auto_Nutrition - Oats, 2 servings", "Oats"),
+            ("Auto_Nutrition - Apple", "Apple"),
+            ("Whey Protein", "Whey Protein"),
+            ("纯牛奶 - 牛奶, 250 ml", "纯牛奶 - 牛奶, 250 ml"),
+            ("Milk (Full Cream, 300ml)", "Milk (Full Cream, 300ml)"),
+            ("", ""),
+        ],
+    )
+    def test_strips_brand_and_serving(self, raw, expected):
+        assert _normalize_entry_name(raw) == expected
+
+    def test_removes_item_reported_with_brand_prefix(self, adapter):
+        """端到端：用网页端带前缀的名字删除，journal 必须同步掉。"""
+        adapter._log_to_local_journal(
+            "2026-10-23", "Dinner",
+            [{"name": "肌酸", "calories": 0}, {"name": "鱼油", "calories": 20}],
+        )
+
+        removed = adapter._remove_from_journal(
+            "2026-10-23", "Dinner", "Auto_Nutrition - 肌酸, 1 serving(s)"
+        )
+
+        assert removed == 1
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert [i["name"] for i in journal[0]["items"]] == ["鱼油"]
+
+    def test_match_is_case_insensitive(self, adapter):
+        adapter._log_to_local_journal("2026-10-23", "Snack", [{"name": "Whey Protein", "calories": 120}])
+
+        assert adapter._remove_from_journal(
+            "2026-10-23", "Snack", "Auto_Nutrition - whey protein, 1 serving(s)"
+        ) == 1
+
+    def test_empty_name_does_not_wipe_journal(self, adapter):
+        """空名字归一化后为空，必须直接放弃，不能匹配到任意空名条目。"""
+        adapter._log_to_local_journal("2026-10-23", "Snack", [{"name": "", "calories": 10}])
+
+        assert adapter._remove_from_journal("2026-10-23", "Snack", "Auto_Nutrition - , 1 serving(s)") == 0
