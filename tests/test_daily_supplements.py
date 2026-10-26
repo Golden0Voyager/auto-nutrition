@@ -324,6 +324,146 @@ class TestRecordDailySupplements:
         assert "鱼油" in [item["name"] for item in dinner]
 
 
+class TestResolveSegments:
+    """段名归一化：短名、完整 key 都认，未知段名明确报错而不是静默忽略。"""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (["morning"], {"morning_stack"}),
+            (["dinner"], {"dinner_stack"}),
+            (["night"], {"night_stack"}),
+            (["workout"], {"workout_stack"}),
+            (["night_stack"], {"night_stack"}),
+            (["Morning", " DINNER "], {"morning_stack", "dinner_stack"}),
+        ],
+    )
+    def test_short_names_and_full_keys(self, raw, expected):
+        keys, error = mfp_adapter._resolve_segments(raw)
+
+        assert keys == expected
+        assert error is None
+
+    @pytest.mark.parametrize("raw", [None, []])
+    def test_empty_means_all_segments(self, raw):
+        assert mfp_adapter._resolve_segments(raw) == (None, None)
+
+    def test_unknown_name_is_an_error_not_a_silent_skip(self):
+        keys, error = mfp_adapter._resolve_segments(["mornin"])
+
+        assert keys is None
+        assert error is not None
+        assert "mornin" in error
+        assert "morning" in error
+
+
+class TestPlanOnlySegments:
+    """only= 只排指定段：定时任务按作息逐段调用时用。"""
+
+    def test_only_filters_to_a_single_segment(self):
+        plan = _plan(only={"night_stack"})
+
+        assert [(s["routine"], s["meal_type"]) for s in plan["segments"]] == [
+            ("night_stack", "snack")
+        ]
+
+    def test_only_none_keeps_all_default_segments(self):
+        assert len(_plan(only=None)["segments"]) == 3
+
+    def test_only_workout_still_requires_include_workout(self):
+        assert _plan(only={"workout_stack"})["segments"] == []
+
+    def test_multi_dose_item_is_not_blocked_when_scoped(self):
+        plan = _plan(only={"morning_stack"}, logged_anywhere={"鱼油": "Dinner"})
+
+        names = [item["name"] for s in plan["segments"] for item in s["items"]]
+        assert "鱼油" in names
+
+    def test_single_dose_item_is_blocked_cross_meal_when_scoped(self):
+        plan = _plan(only={"morning_stack"}, logged_anywhere={"辅酶Q10": "Lunch"})
+
+        names = [item["name"] for s in plan["segments"] for item in s["items"]]
+        assert "辅酶Q10" not in names
+        assert plan["skipped_cross_meal"] == ["辅酶Q10（已记在午餐）"]
+
+
+class TestSegmentScopedWrite:
+    """record_daily_supplements(segments=...) 只写指定段，幂等与跨餐次保护照常。"""
+
+    @pytest.fixture
+    def adapter(self, tmp_path):
+        adapter = MFPAdapter.__new__(MFPAdapter)
+        adapter._config = {"routines": copy.deepcopy(ROUTINES)}
+        adapter._config_mtime = 0
+        adapter.JOURNAL_FILE = str(tmp_path / "journal.json")
+        adapter._JOURNAL_MAX_ENTRIES = 200
+        adapter._load_config = lambda: adapter._config
+        adapter.record_nutrition = MagicMock(
+            side_effect=lambda _date, _meal, items: {"status": "ok", "count": len(items)}
+        )
+        return adapter
+
+    def test_only_morning_writes_a_single_breakfast_call(self, adapter):
+        output = adapter.record_daily_supplements("2026-10-24", segments=["morning"])
+
+        assert adapter.record_nutrition.call_count == 1
+        assert adapter.record_nutrition.call_args.args[1] == "breakfast"
+        assert "晨补" in output
+
+    def test_only_night_writes_a_single_snack_call(self, adapter):
+        adapter.record_daily_supplements("2026-10-24", segments=["night"])
+
+        assert adapter.record_nutrition.call_count == 1
+        assert adapter.record_nutrition.call_args.args[1] == "snack"
+
+    def test_full_routine_key_is_accepted(self, adapter):
+        adapter.record_daily_supplements("2026-10-24", segments=["dinner_stack"])
+
+        assert adapter.record_nutrition.call_args.args[1] == "dinner"
+
+    def test_unknown_segment_returns_error_without_writing(self, adapter):
+        output = adapter.record_daily_supplements("2026-10-24", segments=["mornin"])
+
+        adapter.record_nutrition.assert_not_called()
+        assert output.startswith("错误")
+        assert "mornin" in output
+
+    def test_workout_segment_implies_include_workout(self, adapter):
+        adapter.record_daily_supplements("2026-10-24", segments=["workout"])
+
+        assert adapter.record_nutrition.call_count == 1
+        names = [item["name"] for item in adapter.record_nutrition.call_args.args[2]]
+        assert "Whey Protein" in names
+
+    def test_segments_can_be_combined(self, adapter):
+        adapter.record_daily_supplements("2026-10-24", segments=["dinner", "night"])
+
+        meals = [call.args[1] for call in adapter.record_nutrition.call_args_list]
+        assert meals == ["dinner", "snack"]
+
+    def test_rerunning_the_same_segment_writes_nothing(self, adapter):
+        adapter._write_journal([
+            {
+                "timestamp": "2026-10-24T08:00:00",
+                "date": "2026-10-24",
+                "meal_name": "Breakfast",
+                "items": [{"name": n} for n in ("辅酶Q10", "B族维生素", "鱼油", "D3+K2")],
+            }
+        ])
+
+        output = adapter.record_daily_supplements("2026-10-24", segments=["morning"])
+
+        adapter.record_nutrition.assert_not_called()
+        assert "没有需要新写入" in output
+
+    def test_dry_run_title_names_the_segment(self, adapter):
+        output = adapter.record_daily_supplements("2026-10-24", dry_run=True, segments=["night"])
+
+        assert "睡前补剂" in output
+        assert "1 条" in output
+        adapter.record_nutrition.assert_not_called()
+
+
 class TestToolWrapper:
     def test_delegates_to_adapter(self, monkeypatch):
         fake = MagicMock()
@@ -336,8 +476,22 @@ class TestToolWrapper:
 
         assert output == "已记录"
         fake.record_daily_supplements.assert_called_once_with(
-            "2026-10-24", include_workout=True, skip=["D3"], dry_run=True, force=False
+            "2026-10-24",
+            include_workout=True,
+            skip=["D3"],
+            dry_run=True,
+            force=False,
+            segments=None,
         )
+
+    def test_forwards_segments(self, monkeypatch):
+        fake = MagicMock()
+        fake.record_daily_supplements.return_value = "已记录"
+        monkeypatch.setattr(mfp_adapter, "get_adapter", lambda: fake)
+
+        mfp_adapter.record_daily_supplements("2026-10-24", segments=["morning"])
+
+        assert fake.record_daily_supplements.call_args.kwargs["segments"] == ["morning"]
 
     def test_returns_error_string_instead_of_raising(self, monkeypatch):
         def _boom():
