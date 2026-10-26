@@ -488,6 +488,11 @@ def _normalize_entry_name(name: str) -> str:
     return _ENTRY_SERVING_SUFFIX_RE.sub("", text).strip()
 
 
+def _normalize_meal_name(text: str) -> str:
+    """套餐名归一化：折叠空白 + casefold，用于「是不是同一个名字」的比对。"""
+    return " ".join(str(text or "").split()).casefold()
+
+
 class MFPAdapter:
     """
     MyFitnessPal 适配器，负责维护会话并执行写入操作。
@@ -1289,6 +1294,103 @@ class MFPAdapter:
         )
         raise ValueError(f"「{meal_ref}」匹配到多个套餐: {listed}。请用 meal_id 指定。")
 
+    def _cached_meals(self, ttl: float = 120.0) -> list[dict[str, Any]]:
+        """带 TTL 的套餐列表缓存。
+
+        record_nutrition 每次写入都要做一次套餐名探测，不能每次都打网络。
+        TTL 取 120s：够挡住同一轮对话里的连续调用，又不至于让新建的套餐
+        长时间看不见（record_meal 自己不走缓存，仍然实时拉取）。
+        """
+        cached = getattr(self, "_meals_cache", None)
+        now = time.time()
+        if cached and now - cached[0] < ttl:
+            return cached[1]
+        meals = self.get_my_meals()
+        self._meals_cache = (now, meals)
+        return meals
+
+    def _saved_meal_ref(self, item: Any, meals: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """判断单条输入是不是在引用某个 MFP 套餐；是则返回该套餐。
+
+        只认两种情况，且都要求套餐名方向为「套餐名 ⊂ 输入」：
+
+        1. **精确**：输入（或剥掉数量后的名字）与套餐名完全相同。
+           `1份 牛奶蛋白粉` 也算，因为 _parse_quantity 剥出了 `牛奶蛋白粉`。
+        2. **包含**：套餐名出现在更长的输入里，如 `牛奶蛋白粉套餐`。
+
+        两条护栏：
+        - 带真实规格（ml/g/kg/oz/l）的输入直接放弃——`250ml 牛奶` 是在称重，
+          不是在引用名为「牛奶」的套餐，否则刚修好的规格折算又被绕回去。
+        - 反向包含（输入 ⊂ 套餐名）不算——`Milk` 不能命中 `Milk Oatmeal`。
+        """
+        texts: list[str] = []
+        if isinstance(item, str):
+            if _size_spec(item) is not None:
+                return None
+            texts.append(item)
+            _, _, parsed_name = self._parse_quantity(item)
+            if parsed_name and parsed_name != item:
+                texts.append(parsed_name)
+        elif isinstance(item, dict):
+            name = item.get("name")
+            if isinstance(name, str) and name:
+                texts.append(name)
+        else:
+            return None
+
+        normalized = [_normalize_meal_name(t) for t in texts]
+        normalized = [n for n in normalized if n]
+        if not normalized:
+            return None
+
+        for needle in normalized:
+            exact = [m for m in meals if _normalize_meal_name(m["name"]) == needle]
+            if len(exact) == 1:
+                return exact[0]
+
+        for needle in normalized:
+            contained = [
+                m for m in meals
+                if (mn := _normalize_meal_name(m["name"])) and mn != needle and mn in needle
+            ]
+            if not contained:
+                continue
+            longest = max(len(_normalize_meal_name(m["name"])) for m in contained)
+            best = [m for m in contained if len(_normalize_meal_name(m["name"])) == longest]
+            if len(best) == 1:
+                return best[0]
+        return None
+
+    def split_saved_meal_refs(
+        self, items: list[Any]
+    ) -> tuple[list[dict[str, Any]], list[Any], list[str]]:
+        """把输入拆成「引用套餐的」与「普通食物」两部分。
+
+        返回 ``(要按套餐写入的 meal 列表, 走普通管线的 items, 提示信息)``。
+        套餐列表读不到时全部按普通食物处理——**探测失败绝不能挡住写入**。
+        """
+        try:
+            meals = self._cached_meals()
+        except Exception as exc:
+            logger.warning("套餐名探测跳过（读取套餐列表失败）: {}", exc)
+            return [], list(items), []
+
+        if not isinstance(meals, list) or not meals:
+            return [], list(items), []
+
+        meal_hits: list[dict[str, Any]] = []
+        plain: list[Any] = []
+        notes: list[str] = []
+        for item in items:
+            meal = self._saved_meal_ref(item, meals)
+            if meal is None:
+                plain.append(item)
+            elif any(m["meal_id"] == meal["meal_id"] for m in meal_hits):
+                notes.append(f"ℹ️ 「{meal['name']}」重复出现，只按套餐写一次。")
+            else:
+                meal_hits.append(meal)
+        return meal_hits, plain, notes
+
     def record_meal(self, date_str: str, meal_type: str, meal_ref: int | str) -> dict[str, Any]:
         """
         把 MFP 自定义套餐整体写入某一餐。
@@ -1300,11 +1402,17 @@ class MFPAdapter:
         meal_ref 可传 meal_id（list_my_meals 获取）或套餐名称（精确/模糊匹配）。
         """
         self._ensure_token_valid()
-        meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
-        meal_name = meal_map.get(meal_type.lower(), "Snacks")
-
         meals = self.get_my_meals()
         meal = self._resolve_meal(meals, meal_ref)
+        return self._write_resolved_meal(date_str, meal_type, meal)
+
+    def _write_resolved_meal(
+        self, date_str: str, meal_type: str, meal: dict[str, Any]
+    ) -> dict[str, Any]:
+        """写入一个已经解析好的套餐（供 record_meal 与套餐名探测共用，免二次拉列表）。"""
+        self._ensure_token_valid()
+        meal_map = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
+        meal_name = meal_map.get(meal_type.lower(), "Snacks")
 
         foods = meal.get("foods", [])
         if not foods:
@@ -2057,6 +2165,11 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
       {"name": "宫保鸡丁 Kung Pao Chicken (200g)", "calories": 360,
        "macros": {"protein": 28, "carbs": 18, "fat": 16}}
 
+    ## Saved meals (套餐) are detected automatically
+    MFP 里保存的自定义套餐会被自动识别：如果某条输入就是套餐名（或包含套餐名），
+    该条会改走 record_meal 按套餐自带数值写入，而不是当普通食物查配置/USDA。
+    带真实规格的输入（如 "250ml 牛奶"）不参与识别——那是在称重，不是引用套餐。
+
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         meal_type (str): breakfast, lunch, dinner, or snack. | 餐次类型。
@@ -2068,12 +2181,36 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
         # 🛡️ 服务端时间校验防护层
         time_warnings = _meal_time_warnings(date, meal_type)
 
-        result = mfp.record_nutrition(date, meal_type, items)
+        # 套餐名探测：读不到套餐列表就退回「全部当普通食物」，绝不影响写入
+        try:
+            meal_hits, plain_items, meal_notes = mfp.split_saved_meal_refs(items)
+        except Exception as exc:
+            logger.warning("套餐名探测失败，按普通食物处理: {}", exc)
+            meal_hits, plain_items, meal_notes = [], list(items), []
 
-        output = f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}"
+        lines: list[str] = []
+        for meal in meal_hits:
+            res = mfp._write_resolved_meal(date, meal_type, meal)
+            totals = res.get("totals") or {}
+            calories = float(totals.get("calories") or 0)
+            lines.append(
+                f"✅ 按套餐写入「{meal['name']}」(id={meal['meal_id']})："
+                f"{res.get('count', 0)} 项 / {calories:.0f} kcal"
+            )
+            for warning in res.get("warnings", []) or []:
+                lines.append(f"  {warning}")
+
+        if plain_items:
+            result = mfp.record_nutrition(date, meal_type, plain_items)
+            lines.append(f"成功写入 MyFitnessPal。详情: {json.dumps(result, indent=2, ensure_ascii=False)}")
+
+        if not lines:
+            lines.append("没有需要写入的条目。")
+        lines.extend(meal_notes)
         if time_warnings:
-            output += "\n\n" + "\n".join(time_warnings)
-        return output
+            lines.append("")
+            lines.extend(time_warnings)
+        return "\n".join(lines)
     except Exception as exc:
         return f"错误: {exc}"
 
