@@ -1101,7 +1101,13 @@ class MFPAdapter:
                         "config": config_calories,
                         "config_name": item.get("name", ""),
                     })
-                item["name"] = declared_name
+                # 名字取信息量更大的那个：组合里写的名字往往更口语
+                # （「煎鸡蛋」优于「Fried Egg」），配置里的正式名往往更完整
+                # （「Fish Oil (Swisse 无腥味野生鱼油 1粒 - EPA 180 / DHA 120)」
+                # 优于「鱼油」）。无条件保留原名会让后者退化成「鱼油」，
+                # MFP 里看不出几粒、什么产品。
+                if len(declared_name) > len(item.get("name", "")):
+                    item["name"] = declared_name
                 item["calories"] = float(declared["calories"])
                 # 声明值自带 macros 时整份采用；没带就置空，避免把配置的宏量
                 # 按另一个热量口径塞进来（宁可缺，不可错）。

@@ -174,3 +174,21 @@ class TestDisplayQuantityScaling:
         )
 
         assert item["calories"] == 360.0
+
+
+class TestRegionalFoods:
+    """地方食物必须走配置层。
+
+    中文名喂 USDA 会先被 CN_EN 词表逐词改写——「煎饼果子（鸡蛋+生菜+豆皮+
+    甜辣酱）」会变成「煎饼果子 ( Egg + Lettuce +豆皮+甜辣酱)」，再拿
+    Egg / Lettuce 去搜，命中不相干的食物（比如生菜卷），热量直接错。
+    """
+
+    @pytest.mark.parametrize("query", ["煎饼果子", "煎饼", "Jianbing Guozi"])
+    def test_jianbing_guozi_resolves_to_the_config_entry(self, real_adapter, query):
+        item = real_adapter._apply_config_safeguard({"name": query})
+
+        assert item.get("_config_matched") is True, f"「{query}」没有命中煎饼果子配置"
+        assert "Jianbing" in item["name"]
+        assert item["calories"] == 420
+        assert item["macros"]["protein"] == 14

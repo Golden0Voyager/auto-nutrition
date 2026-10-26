@@ -175,6 +175,21 @@ supplements:
     # 服用建议：每日 1 片，早餐后
 
 regional_foods:
+  jianbing_guozi:
+    name: "Jianbing Guozi (煎饼果子 1份 - 鸡蛋+生菜+豆皮+甜辣酱)"
+    calories: 420
+    macros: { carbs: 48, protein: 14, fat: 17 }
+    micros:
+      fiber: 3.5
+      sodium: 850
+      sugar: 6
+      calcium: 8
+      iron: 2.5
+    aliases: ["煎饼果子", "煎饼", "jianbing", "Jianbing Guozi"]
+    # 估算：绿豆面饼皮 180 + 鸡蛋 90 + 豆皮 45 + 生菜 8 + 甜辣酱 25 + 煎油 45 ≈ 393，
+    # 按市售常见份量取 420 kcal。
+    # 必须走配置层：中文名喂 USDA 会被 CN_EN 词表拆成 "Egg + Lettuce" 搜到
+    # 不相干结果（比如生菜卷），热量直接错。
   bayu_dumplings:
     name: "Mackerel Dumplings (胶东鲅鱼水饺 10只)"
     calories: 550
