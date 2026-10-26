@@ -1493,11 +1493,22 @@ class MFPAdapter:
         skip: list[str] | None = None,
         dry_run: bool = False,
         force: bool = False,
+        segments: list[str] | None = None,
     ) -> str:
-        """把当日补剂按餐次一次记完（晨补 / 晚餐 / 睡前 / 可选训练包）。"""
+        """把当日补剂按餐次一次记完（晨补 / 晚餐 / 睡前 / 可选训练包）。
+
+        ``segments`` 只写指定段（定时任务按作息逐段调用时用）；None 写全部。
+        """
         routines = self._load_config().get("routines", {})
         if not routines:
             return "错误: 配置里没有任何 routine，无法记录全天补剂。"
+
+        only, segment_error = _resolve_segments(segments)
+        if segment_error:
+            return f"错误: {segment_error}"
+        # 显式点了训练包就不再要求 include_workout
+        if only and "workout_stack" in only:
+            include_workout = True
 
         resolved: dict[str, str] = {}
 
@@ -1526,20 +1537,27 @@ class MFPAdapter:
             logged=logged,
             logged_anywhere=logged_anywhere,
             force=force,
+            only=only,
         )
-        segments = plan["segments"]
-        total = sum(len(segment["items"]) for segment in segments)
+        segments_plan = plan["segments"]
+        total = sum(len(segment["items"]) for segment in segments_plan)
+
+        # 指定了段就用「晨补」这类段名做标题，全天模式才叫「全天补剂」
+        if only:
+            scope = "、".join(_SEGMENT_LABELS.get(key, key) for key, _ in DAILY_SUPPLEMENT_SEGMENTS if key in only)
+        else:
+            scope = "全天补剂"
 
         if dry_run:
-            lines = [f"🔍 预览（未写入）{date_str}：{total} 条"]
-            for segment in segments:
+            lines = [f"🔍 预览（未写入）{date_str} {scope}：{total} 条"]
+            for segment in segments_plan:
                 label = _MEAL_LABEL[segment["meal_type"]]
                 names = "、".join(item["name"] for item in segment["items"])
                 lines.append(f"- {label}：{names}")
         else:
-            lines = [f"✅ 全天补剂已写入 {date_str}：{total} 条"]
+            lines = [f"✅ {scope}已写入 {date_str}：{total} 条"]
             failures = 0
-            for segment in segments:
+            for segment in segments_plan:
                 label = _MEAL_LABEL[segment["meal_type"]]
                 names = "、".join(item["name"] for item in segment["items"])
                 try:
@@ -2046,6 +2064,49 @@ _MEAL_LABEL = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "sn
 # journal 里存的是 Breakfast/Lunch/...，提示里要显示中文
 _DISPLAY_LABEL = {display: _MEAL_LABEL[key] for key, display in _MEAL_DISPLAY.items()}
 
+# 分时段写入用的段名别名：短名 → routine key。定时任务按作息逐段调用时用。
+_SEGMENT_ALIASES: dict[str, str] = {
+    "morning": "morning_stack",
+    "dinner": "dinner_stack",
+    "night": "night_stack",
+    "workout": "workout_stack",
+}
+_SEGMENT_LABELS: dict[str, str] = {
+    "morning_stack": "晨补",
+    "dinner_stack": "晚餐补剂",
+    "night_stack": "睡前补剂",
+    "workout_stack": "训练包",
+}
+
+
+def _resolve_segments(segments: list[str] | None) -> tuple[set[str] | None, str | None]:
+    """把调用方传的段名归一化成 routine key 集合。
+
+    返回 ``(keys, 错误信息)``。``keys`` 为 None 表示「不限段，写全部」。
+    未知段名**明确报错**而不是静默忽略——定时任务里静默忽略等于「以为写了
+    其实没写」，比报错危险得多。
+    """
+    if not segments:
+        return None, None
+
+    known = {key for key, _ in DAILY_SUPPLEMENT_SEGMENTS}
+    keys: set[str] = set()
+    unknown: list[str] = []
+    for raw in segments:
+        token = str(raw or "").strip().lower()
+        if not token:
+            continue
+        key = _SEGMENT_ALIASES.get(token, token)
+        if key in known:
+            keys.add(key)
+        else:
+            unknown.append(str(raw))
+
+    if unknown:
+        options = sorted(_SEGMENT_ALIASES) + sorted(known - set(_SEGMENT_ALIASES.values()))
+        return None, f"未知的补剂段: {'、'.join(unknown)}。可选：{', '.join(options)}。"
+    return keys or None, None
+
 
 def _single_dose_names(routines: dict[str, Any], resolve: Callable[[str], str]) -> set[str]:
     """在全部 routine 段里只出现一次的条目名（用解析后的最终名比对）。
@@ -2071,6 +2132,7 @@ def plan_daily_supplements(
     logged: set[tuple[str, str]] | None = None,
     logged_anywhere: dict[str, str] | None = None,
     force: bool = False,
+    only: set[str] | None = None,
 ) -> dict[str, Any]:
     """把一日的补剂拆成「按餐次写入」的计划（纯函数，不做任何 IO）。
 
@@ -2086,6 +2148,8 @@ def plan_daily_supplements(
             再跑全天补剂又在晚餐记一遍」这类跨餐次重复。多剂量条目
             （鱼油 1+2 粒）永远不受影响。
         force: True 时忽略 logged / logged_anywhere（强制重复写入）。
+        only: 只写这些 routine key（如 {"morning_stack"}）。None 表示写全部。
+            定时任务按作息分时段调用时用，幂等与跨餐次保护照常生效。
     """
     tokens = [token.strip().lower() for token in (skip or []) if token.strip()]
     already = set() if force else (logged or set())
@@ -2097,6 +2161,8 @@ def plan_daily_supplements(
     skipped_cross_meal: list[str] = []
 
     for routine_key, meal_type in DAILY_SUPPLEMENT_SEGMENTS:
+        if only is not None and routine_key not in only:
+            continue
         if routine_key == "workout_stack" and not include_workout:
             continue
         routine = routines.get(routine_key)
@@ -2221,6 +2287,7 @@ def record_daily_supplements(
     skip: list[str] | None = None,
     dry_run: bool = False,
     force: bool = False,
+    segments: list[str] | None = None,
 ) -> str:
     """
     Record the whole day's supplements in one call, split by meal.
@@ -2246,6 +2313,11 @@ def record_daily_supplements(
             D3-off day, ["锌镁"] on a rest day. | 要跳过的名称片段。
         dry_run (bool): Only print what would be written. | 只预览不写入。
         force (bool): Ignore the journal and write again. | 忽略已记录检查。
+        segments (list[str] | None): Only write these stacks, e.g. ["morning"].
+            Accepts morning / dinner / night / workout (or the full keys
+            morning_stack / dinner_stack / night_stack / workout_stack).
+            Omit for the whole day. Idempotency and cross-meal protection still
+            apply. | 只写指定段，用于按作息分时段记录；留空写全天。
     """
     try:
         mfp = get_adapter()
@@ -2255,6 +2327,7 @@ def record_daily_supplements(
             skip=skip,
             dry_run=dry_run,
             force=force,
+            segments=segments,
         )
     except Exception as exc:
         logger.error("全天补剂记录失败: {}", exc)
