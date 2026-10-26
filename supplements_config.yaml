@@ -1,8 +1,9 @@
 # Auto_Nutrition Local Config - 补剂与常驻食物库
-# 包含丰富的中西方高频饮食、多国特色菜肴及运动补剂标准库，作为 LLM 识别锚点，防止内容幻觉。
+# 作为 LLM 识别锚点，防止内容幻觉：说别名 → 拿到用户校准过的营养值。
+# 加条目时务必带 aliases，否则口语简称命中不了、会落到 USDA 按 100g 口径乱算。
 
 metadata:
-  version: "1.1"
+  version: "1.2"
   description: "与 MFP (MyFitnessPal) API 对齐的营养素单位规范"
   unit_reference:
     macros:
@@ -45,7 +46,7 @@ supplements:
     calories: 100
     macros: { carbs: 25, protein: 0, fat: 0 }
     micros: { sugar: 12.5, sodium: 28, caffeine: 0 } # 100 版不含咖啡因，100 CAF 为 100mg
-    aliases: ["能量胶", "补给胶", "马丁胶", "马丁", "Gel", "Maurten", "100胶"]
+    aliases: ["能量胶", "补给胶", "马丁胶", "马丁", "Gel", "Maurten Gel", "Maurten 100", "100胶"]
   electrolytes_tablet:
     name: "Electrolyte Tab / Salt Pill (电解质盐丸/无糖泡腾片)"
     calories: 0
@@ -56,7 +57,7 @@ supplements:
     name: "Creatine Monohydrate (一水肌酸 3g - 99.9% 纯度)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
-    aliases: ["肌酸", "一水肌酸", "肌酸粉", "creatine", "Creatine", "Creatine Monohydrate", "3g肌酸"]
+    aliases: ["肌酸", "一水肌酸", "肌酸粉", "creatine", "Creatine Monohydrate", "3g肌酸"]
     # 服用建议：每日 3g 恒量（不做冲击期）；随晚餐服用（已从训练包移出，见 dinner_stack）；250-300ml 温水
   d3_k2_1cap:
     name: "Vitamin D3 + K2 [M] (Sports Research 植物源 1粒 - D3 5000IU / K2 100mcg)"
@@ -65,21 +66,21 @@ supplements:
     micros:
       vitamin_d: 625 # 125mcg / 20mcg（MFP 用 %DV）
       vitamin_k: 100 # MK-7，mcg；MFP 无该字段，仅本地日志
-    aliases: ["D3", "K2", "D3K2", "D3+K2", "维生素D3", "维生素K2", "Sports Research", "阳光瓶"]
+    aliases: ["D3", "K2", "D3K2", "D3+K2", "维生素D3", "维生素K2", "Sports Research D3", "Sports Research D3+K2", "阳光瓶"]
     # 服用建议：隔天 1 粒（日均 2500IU），随含脂早餐
   coq10_1cap:
     name: "CoQ10 [M] (三金牌 辅酶Q10 1粒 - 泛醌 36-50mg)"
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
     micros: { coq10: 45 } # 按 36-50mg 取中值；仅本地日志
-    aliases: ["辅酶Q10", "辅酶Q10片", "Q10", "CoQ10", "泛醌", "三金"]
+    aliases: ["辅酶Q10", "辅酶Q10片", "Q10", "CoQ10", "泛醌", "三金牌 辅酶Q10", "三金 Q10"]
     # 服用建议：每日 1 粒，随含脂早餐（与鱼油、D3+K2 同服）
   zma_2tabs:
     name: "ZMA [M] (诺特兰德 锌镁片 2片 - Mg 265mg / Zn 10.5mg)"
     calories: 4.8
     macros: { carbs: 1.2, protein: 0, fat: 0 }
     micros: { magnesium: 265, zinc: 10.5, vitamin_b1: 1, vitamin_b2: 1, vitamin_b6: 1 }
-    aliases: ["锌镁片", "锌镁", "ZMA", "诺特兰德", "镁锌片"]
+    aliases: ["锌镁片", "锌镁", "ZMA", "诺特兰德 锌镁", "诺特兰德 ZMA", "镁锌片"]
     # 服用建议：训练日睡前 30-60 分钟 2 片，休息日 1 片；与晚餐钙片间隔 >3h，勿用牛奶送服
 
   # --- 精准运动功能饮料与补剂 ---
@@ -122,7 +123,7 @@ supplements:
       cholesterol: 5.7
       vitamin_a: 33.3 # 300mcg / 900mcg
       vitamin_d: 12.5 # 2.5mcg / 20mcg
-    aliases: ["鱼油", "Swisse", "无腥味鱼油", "野生鱼油", "Omega-3", "omega3"]
+    aliases: ["鱼油", "Swisse 鱼油", "Swisse Fish Oil", "无腥味鱼油", "野生鱼油", "Omega-3", "omega3"]
     # 服用建议：每日 2 粒（早餐 1 + 晚餐 1），合计 600mg EPA+DHA。
     # 2026-10-26 从「每日 3-4 粒（900-1200mg）」下调——1200mg 虽在安全区间
     # （FDA 上限 3000mg），但对基础保健属边际收益递减，减半即可。
@@ -150,7 +151,7 @@ supplements:
     calories: 0
     macros: { carbs: 0, protein: 0, fat: 0 }
     micros: { curcumin: 1000, piperine: 5 }
-    aliases: ["姜黄素", "姜黄", "Piping Rock", "姜黄素复合", "胡椒碱"]
+    aliases: ["姜黄素", "姜黄", "Piping Rock 姜黄", "Piping Rock Curcumin", "姜黄素复合", "胡椒碱"]
     # 服用建议：仅大训练日/酸痛日随午餐 1 粒，休息日停用；胆囊结晶者避免空腹服用
   glucosamine_pill:
     name: "Glucosamine + Calcium [M] (Move Free 进阶版 2片 - 氨糖 1500mg / 钙 600mg)"
@@ -160,7 +161,7 @@ supplements:
       glucosamine: 1500
       calcium: 46.2 # 600mg / 1300mg（MFP 用 %DV）
     aliases: ["氨糖", "氨糖软骨素", "关节片", "Move Free", "益节", "氨糖钙片"]
-    # 服用建议：每日 2 粒，晚餐随餐；与早间辅酶Q10、睡前锌镁片各错开 3h
+    # 服用建议：每日 2 粒，晚餐随餐。已含钙 600mg，不必再额外补钙片。
   vitamin_b_complex:
     name: "Vitamin B Complex (康纽莱 多种B族 1片)"
     calories: 0
@@ -171,7 +172,7 @@ supplements:
       vitamin_b6: 6
       vitamin_b3: 7.5
       vitamin_b5: 7.2
-    aliases: ["维生素B", "VB", "B族", "B族维生素", "康纽莱"]
+    aliases: ["维生素B", "VB", "B族", "B族维生素", "康纽莱 B族", "康纽莱 维生素B"]
     # 服用建议：每日 1 片，早餐后
 
 regional_foods:
