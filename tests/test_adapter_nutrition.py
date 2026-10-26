@@ -468,6 +468,54 @@ class TestComboDeclaredValues:
         assert adapter._create_custom_food.call_args[0][0]["calories"] == 90
 
 
+class TestSameMealDuplicateHint:
+    """同一条命令跑两次时给一条提示，不拦。
+
+    基线复用 _diary_entries_snapshot（本来就要取来防双写），零额外请求。
+    跨餐次不提示——早餐和晚餐各喝一杯牛奶是正常需求。
+    """
+
+    def _with_snapshot(self, adapter, entries):
+        adapter._diary_entries_snapshot = MagicMock(return_value=entries)
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        return adapter
+
+    def test_hints_when_same_meal_already_has_the_item(self, adapter_with_config):
+        adapter = self._with_snapshot(
+            adapter_with_config,
+            [("Breakfast", "Auto_Nutrition - Apple, 1 serving(s)")],
+        )
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "breakfast", [{"name": "Apple", "calories": 95}]
+        )
+
+        assert any("今天已有同名条目" in w for w in result["warnings"])
+        assert result["count"] == 1  # 仍然写入，只是提示
+
+    def test_no_hint_when_item_is_in_another_meal(self, adapter_with_config):
+        adapter = self._with_snapshot(
+            adapter_with_config,
+            [("Dinner", "Auto_Nutrition - Apple, 1 serving(s)")],
+        )
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "breakfast", [{"name": "Apple", "calories": 95}]
+        )
+
+        assert "warnings" not in result
+
+    def test_no_hint_when_snapshot_is_unavailable(self, adapter_with_config):
+        adapter = self._with_snapshot(adapter_with_config, None)
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "breakfast", [{"name": "Apple", "calories": 95}]
+        )
+
+        assert "warnings" not in result
+
+
 class TestRecordNutritionEdgeCases:
     def test_empty_items(self, adapter):
         mock_create_food(adapter)
