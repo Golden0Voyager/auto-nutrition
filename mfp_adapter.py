@@ -1544,7 +1544,11 @@ class MFPAdapter:
 
         # 指定了段就用「晨补」这类段名做标题，全天模式才叫「全天补剂」
         if only:
-            scope = "、".join(_SEGMENT_LABELS.get(key, key) for key, _ in DAILY_SUPPLEMENT_SEGMENTS if key in only)
+            scope = "、".join(
+                _SEGMENT_LABELS.get(key, key)
+                for key, _ in DAILY_SUPPLEMENT_SEGMENTS + EXTRA_SUPPLEMENT_SEGMENTS
+                if key in only
+            )
         else:
             scope = "全天补剂"
 
@@ -2059,6 +2063,12 @@ DAILY_SUPPLEMENT_SEGMENTS: tuple[tuple[str, str], ...] = (
     ("night_stack", "snack"),
     ("workout_stack", "snack"),
 )
+# 额外段：**不进「全天补剂」组合**，只能在 segments 里显式点名才写。
+# 放的是「不是每天吃」的补剂——混进全天组合就会在不需要的日子多记一遍。
+# 目前只有 D3+K2（隔天 1 粒，日均 2500IU）。
+EXTRA_SUPPLEMENT_SEGMENTS: tuple[tuple[str, str], ...] = (
+    ("d3_k2_stack", "breakfast"),
+)
 _MEAL_DISPLAY = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
 _MEAL_LABEL = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
 # journal 里存的是 Breakfast/Lunch/...，提示里要显示中文
@@ -2070,12 +2080,15 @@ _SEGMENT_ALIASES: dict[str, str] = {
     "dinner": "dinner_stack",
     "night": "night_stack",
     "workout": "workout_stack",
+    "d3": "d3_k2_stack",
+    "d3k2": "d3_k2_stack",
 }
 _SEGMENT_LABELS: dict[str, str] = {
     "morning_stack": "晨补",
     "dinner_stack": "晚餐补剂",
     "night_stack": "睡前补剂",
     "workout_stack": "训练包",
+    "d3_k2_stack": "D3+K2",
 }
 
 
@@ -2089,7 +2102,7 @@ def _resolve_segments(segments: list[str] | None) -> tuple[set[str] | None, str 
     if not segments:
         return None, None
 
-    known = {key for key, _ in DAILY_SUPPLEMENT_SEGMENTS}
+    known = {key for key, _ in DAILY_SUPPLEMENT_SEGMENTS + EXTRA_SUPPLEMENT_SEGMENTS}
     keys: set[str] = set()
     unknown: list[str] = []
     for raw in segments:
@@ -2160,7 +2173,12 @@ def plan_daily_supplements(
     skipped_logged: list[str] = []
     skipped_cross_meal: list[str] = []
 
-    for routine_key, meal_type in DAILY_SUPPLEMENT_SEGMENTS:
+    # 全天模式只走标准段；EXTRA 段（如隔天的 D3+K2）必须被 only 显式点名才写。
+    ordered: list[tuple[str, str]] = list(DAILY_SUPPLEMENT_SEGMENTS)
+    if only:
+        ordered += [(key, meal) for key, meal in EXTRA_SUPPLEMENT_SEGMENTS if key in only]
+
+    for routine_key, meal_type in ordered:
         if only is not None and routine_key not in only:
             continue
         if routine_key == "workout_stack" and not include_workout:
