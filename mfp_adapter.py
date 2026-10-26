@@ -1056,8 +1056,17 @@ class MFPAdapter:
         config_conflicts: list[dict[str, Any]] = []
         # 未匹配且名称含中文的条目：USDA 只索引英文，需要提示改英文名重录
         non_english_misses: list[str] = []
+        # 同餐次重名提示：复用已取到的基线，零额外请求
+        same_meal_before: set[str] = set()
+        same_meal_duplicates: list[str] = []
         # 写入前基线：仅用于 5xx/超时后判断「是否已落库」，避免重试造成双计
         diary_snapshot = self._diary_entries_snapshot(date_str)
+        if diary_snapshot:
+            same_meal_before = {
+                _normalize_entry_name(name).casefold()
+                for snap_meal, name in diary_snapshot
+                if snap_meal == meal_name
+            }
 
         def _verify_written(item_name: str) -> bool:
             return self._verify_item_written(date_str, meal_name, item_name, diary_snapshot)
@@ -1136,6 +1145,10 @@ class MFPAdapter:
             if "macros" not in item:
                 item["macros"] = {}
 
+            # 同餐次已有同名条目 → 只提示，不拦（同一餐吃两份是合法需求）
+            if same_meal_before and _normalize_entry_name(item["name"]).casefold() in same_meal_before:
+                same_meal_duplicates.append(item["name"])
+
             processed_items.append(item)
 
             try:
@@ -1178,6 +1191,12 @@ class MFPAdapter:
                 f'（中文词表只覆盖常见食材）：请改用英文名重录，'
                 f'如 "Oats" / "Chicken breast" / "Avocado"；'
                 f'或把该食物加到 supplements_config.yaml 作为配置锚点。'
+            )
+        if same_meal_duplicates:
+            label = _DISPLAY_LABEL.get(meal_name, meal_name)
+            warnings.append(
+                f'ℹ️ {label}今天已有同名条目，本次仍写入：{", ".join(same_meal_duplicates)}。'
+                f'若是重复执行，请用 delete_entry 删掉多出来的那条。'
             )
         for conflict in config_conflicts:
             warnings.append(
@@ -1380,13 +1399,16 @@ class MFPAdapter:
             return resolved[name]
 
         logged: set[tuple[str, str]] = set()
+        logged_anywhere: dict[str, str] = {}
         if not force:
             for record in self._read_journal():
                 if record.get("date") != date_str:
                     continue
                 meal_name = record.get("meal_name", "")
                 for item in record.get("items", []):
-                    logged.add((meal_name, item.get("name", "")))
+                    name = item.get("name", "")
+                    logged.add((meal_name, name))
+                    logged_anywhere.setdefault(name, meal_name)
 
         plan = plan_daily_supplements(
             routines,
@@ -1394,6 +1416,7 @@ class MFPAdapter:
             include_workout=include_workout,
             skip=skip,
             logged=logged,
+            logged_anywhere=logged_anywhere,
             force=force,
         )
         segments = plan["segments"]
@@ -1428,6 +1451,9 @@ class MFPAdapter:
             lines.append(f"跳过（你指定）：{'、'.join(plan['skipped_by_user'])}")
         if plan["skipped_logged"]:
             lines.append(f"跳过（今天已记）：{'、'.join(plan['skipped_logged'])}")
+        if plan["skipped_cross_meal"]:
+            lines.append(f"跳过（今天已在其他餐次记过）：{'、'.join(plan['skipped_cross_meal'])}")
+            lines.append("  这类每日恒量条目重复记会让总量翻倍；确需再记一次请加 force=true。")
         return "\n".join(lines)
 
     def _read_journal(self) -> list[dict[str, Any]]:
@@ -1909,6 +1935,23 @@ DAILY_SUPPLEMENT_SEGMENTS: tuple[tuple[str, str], ...] = (
 )
 _MEAL_DISPLAY = {"breakfast": "Breakfast", "lunch": "Lunch", "dinner": "Dinner", "snack": "Snacks"}
 _MEAL_LABEL = {"breakfast": "早餐", "lunch": "午餐", "dinner": "晚餐", "snack": "加餐"}
+# journal 里存的是 Breakfast/Lunch/...，提示里要显示中文
+_DISPLAY_LABEL = {display: _MEAL_LABEL[key] for key, display in _MEAL_DISPLAY.items()}
+
+
+def _single_dose_names(routines: dict[str, Any], resolve: Callable[[str], str]) -> set[str]:
+    """在全部 routine 段里只出现一次的条目名（用解析后的最终名比对）。
+
+    鱼油同时出现在晨补和晚餐（1 粒 + 2 粒，故意分两次），这类「多剂量」
+    条目不能做跨餐次去重，否则晚餐那份会被误跳过。只有全局唯一出现的
+    条目（如肌酸）才把「别处已记」当成重复。
+    """
+    counts: dict[str, int] = {}
+    for routine in routines.values():
+        for item in routine.get("items", []):
+            final = resolve(item["name"])
+            counts[final] = counts.get(final, 0) + 1
+    return {name for name, count in counts.items() if count == 1}
 
 
 def plan_daily_supplements(
@@ -1918,6 +1961,7 @@ def plan_daily_supplements(
     include_workout: bool = False,
     skip: list[str] | None = None,
     logged: set[tuple[str, str]] | None = None,
+    logged_anywhere: dict[str, str] | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
     """把一日的补剂拆成「按餐次写入」的计划（纯函数，不做任何 IO）。
@@ -1929,13 +1973,20 @@ def plan_daily_supplements(
         skip: 名称片段，命中即跳过（如 ["D3"] 跳过 D3+K2）。
         logged: 当日已写入的 (meal_name, 食物名) 集合；按餐次隔离，
             所以早餐鱼油不会影响晚餐鱼油。
-        force: True 时忽略 logged（强制重复写入）。
+        logged_anywhere: 当日已写入的 食物名 -> 餐次（不分餐次）。只对
+            **全局只出现一次** 的条目生效——用来挡住「午餐单独记了肌酸、
+            再跑全天补剂又在晚餐记一遍」这类跨餐次重复。多剂量条目
+            （鱼油 1+2 粒）永远不受影响。
+        force: True 时忽略 logged / logged_anywhere（强制重复写入）。
     """
     tokens = [token.strip().lower() for token in (skip or []) if token.strip()]
     already = set() if force else (logged or set())
+    elsewhere = {} if force else dict(logged_anywhere or {})
+    single_dose = _single_dose_names(routines, resolve)
     segments: list[dict[str, Any]] = []
     skipped_by_user: list[str] = []
     skipped_logged: list[str] = []
+    skipped_cross_meal: list[str] = []
 
     for routine_key, meal_type in DAILY_SUPPLEMENT_SEGMENTS:
         if routine_key == "workout_stack" and not include_workout:
@@ -1955,6 +2006,11 @@ def plan_daily_supplements(
             if (meal_name, final_name) in already:
                 skipped_logged.append(item["name"])
                 continue
+            other_meal = elsewhere.get(final_name)
+            if other_meal and other_meal != meal_name and final_name in single_dose:
+                label = _DISPLAY_LABEL.get(other_meal, other_meal)
+                skipped_cross_meal.append(f"{item['name']}（已记在{label}）")
+                continue
             kept.append(item)
 
         if kept:
@@ -1964,6 +2020,7 @@ def plan_daily_supplements(
         "segments": segments,
         "skipped_by_user": skipped_by_user,
         "skipped_logged": skipped_logged,
+        "skipped_cross_meal": skipped_cross_meal,
     }
 
 
@@ -2039,10 +2096,14 @@ def record_daily_supplements(
     幂等: 写入前比对本地 journal，**同一餐次**下已存在的同名条目自动跳过
     （早餐鱼油不会挡住晚餐鱼油）；需要重复记录时传 force=True。
 
+    跨餐次保护: 对**全局只出现一次**的条目（如肌酸），若今天已在别的餐次
+    记过（例如午餐单独记了一次），本次会跳过并提示，避免总量翻倍。
+    故意分两次服用的多剂量条目（鱼油：晨补 1 粒 + 晚餐 2 粒）不受影响。
+
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
         include_workout (bool): Also write the workout stack (beetroot + whey +
-            milk + creatine). Off by default — it overlaps with a real
+            milk). Off by default — it overlaps with a real
             post-workout meal. | 是否追加训练包，默认不记。
         skip (list[str] | None): Name fragments to skip, e.g. ["D3"] on a
             D3-off day, ["锌镁"] on a rest day. | 要跳过的名称片段。

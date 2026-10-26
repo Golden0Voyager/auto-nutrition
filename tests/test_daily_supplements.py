@@ -95,6 +95,49 @@ class TestPlanDailySupplements:
         assert "鱼油" in [i["name"] for i in plan["segments"][0]["items"]]
 
 
+class TestCrossMealDuplicates:
+    """跨餐次重复保护：只挡「全局只出现一次」的条目。
+
+    真实事故：午餐单独记了肌酸，再跑全天补剂（训练包也在写肌酸），一天记两次。
+    幂等键是 (餐次, 名称)，Snacks 与 Lunch 永不相等，所以同一餐次检查抓不到。
+    """
+
+    def test_single_dose_item_logged_elsewhere_is_skipped(self):
+        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Lunch"})
+
+        workout = plan["segments"][-1]["items"]
+        assert "肌酸" not in [i["name"] for i in workout]
+        assert plan["skipped_cross_meal"] == ["肌酸（已记在午餐）"]
+
+    def test_multi_dose_item_is_never_cross_meal_skipped(self):
+        """鱼油晨补 1 粒 + 晚餐 2 粒，别处记过也不能跳过。"""
+        plan = _plan(logged_anywhere={"鱼油": "Lunch"})
+
+        assert "鱼油" in [i["name"] for i in plan["segments"][0]["items"]]
+        assert "鱼油" in [i["name"] for i in plan["segments"][1]["items"]]
+        assert plan["skipped_cross_meal"] == []
+
+    def test_same_meal_hit_reports_as_logged_not_cross_meal(self):
+        plan = _plan(
+            logged={("Breakfast", "辅酶Q10")},
+            logged_anywhere={"辅酶Q10": "Breakfast"},
+        )
+
+        assert plan["skipped_logged"] == ["辅酶Q10"]
+        assert plan["skipped_cross_meal"] == []
+
+    def test_force_ignores_cross_meal(self):
+        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Lunch"}, force=True)
+
+        assert "肌酸" in [i["name"] for i in plan["segments"][-1]["items"]]
+        assert plan["skipped_cross_meal"] == []
+
+    def test_unknown_meal_name_falls_back_to_raw(self):
+        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Brunch"})
+
+        assert plan["skipped_cross_meal"] == ["肌酸（已记在Brunch）"]
+
+
 class TestRecordDailySupplements:
     @pytest.fixture
     def adapter(self, tmp_path):
@@ -228,6 +271,57 @@ class TestRecordDailySupplements:
         assert adapter.record_nutrition.call_count == 3
         assert "❌" in output
         assert "1 段写入失败" in output
+
+    def test_cross_meal_duplicate_is_skipped_and_reported(self, adapter):
+        """午餐单独记过肌酸，训练包里的那份必须跳过（否则一天记两次）。"""
+        adapter._write_journal([
+            {
+                "timestamp": "2026-10-24T12:00:00",
+                "date": "2026-10-24",
+                "meal_name": "Lunch",
+                "items": [{"name": "肌酸"}],
+            },
+        ])
+
+        output = adapter.record_daily_supplements("2026-10-24", include_workout=True)
+
+        workout_items = adapter.record_nutrition.call_args_list[-1].args[2]
+        assert "肌酸" not in [item["name"] for item in workout_items]
+        assert "其他餐次" in output
+        assert "肌酸（已记在午餐）" in output
+
+    def test_force_writes_cross_meal_duplicate(self, adapter):
+        adapter._write_journal([
+            {
+                "timestamp": "2026-10-24T12:00:00",
+                "date": "2026-10-24",
+                "meal_name": "Lunch",
+                "items": [{"name": "肌酸"}],
+            },
+        ])
+
+        adapter.record_daily_supplements("2026-10-24", include_workout=True, force=True)
+
+        workout_items = adapter.record_nutrition.call_args_list[-1].args[2]
+        assert "肌酸" in [item["name"] for item in workout_items]
+
+    def test_multi_dose_item_survives_a_cross_meal_hit(self, adapter):
+        """鱼油早餐+晚餐各一份是设计如此，别处记过也不能跳过。"""
+        adapter._write_journal([
+            {
+                "timestamp": "2026-10-24T12:00:00",
+                "date": "2026-10-24",
+                "meal_name": "Lunch",
+                "items": [{"name": "鱼油"}],
+            },
+        ])
+
+        adapter.record_daily_supplements("2026-10-24")
+
+        breakfast = adapter.record_nutrition.call_args_list[0].args[2]
+        dinner = adapter.record_nutrition.call_args_list[1].args[2]
+        assert "鱼油" in [item["name"] for item in breakfast]
+        assert "鱼油" in [item["name"] for item in dinner]
 
 
 class TestToolWrapper:
