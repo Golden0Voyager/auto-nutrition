@@ -140,6 +140,19 @@ class TestFetchAccessToken:
 
 
 class TestEnsureTokenValid:
+    def test_fresh_one_hour_token_is_not_refreshed_on_every_call(self, adapter_without_network):
+        adapter = adapter_without_network
+        resp = MagicMock()
+        resp.json.return_value = {"access_token": "tok123", "user_id": 99, "expires_in": 3600}
+        adapter.session.get.return_value = resp
+
+        adapter._fetch_access_token()
+        adapter.session.get.reset_mock()
+        for _ in range(5):
+            adapter._ensure_token_valid()
+
+        assert adapter.session.get.call_count == 0
+
     def test_valid_token_passes(self, adapter_without_network):
         adapter = adapter_without_network
         adapter.access_token = "valid"

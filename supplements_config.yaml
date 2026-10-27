@@ -270,6 +270,20 @@ common_foods:
       iron: 4.8
     aliases: ["煎鸡蛋", "煎蛋", "荷包蛋", "单面煎蛋", "双面煎蛋"]
 
+  oats_15g:
+    name: "Oats (燕麦片 15g)"
+    calories: 37
+    macros: { protein: 2.6, carbs: 9.9, fat: 1.1 }
+    micros: { fiber: 2.3, iron: 4.5, potassium: 85, sodium: 0.6, calcium: 0.7 }
+    aliases: ["Oats", "燕麦片"]
+
+  bread_50g:
+    name: "Bread (法棍/吐司 50g/约2片)"
+    calories: 145
+    macros: { protein: 4.5, carbs: 28.0, fat: 1.5 }
+    micros: { fiber: 1.5, sodium: 250, iron: 5 }
+    aliases: ["Bread", "法棍", "法式面包"]
+
   sam_club_mochi:
     name: "Sam's Club Mochi (山姆麻薯面包 1个约25g)"
     calories: 85

@@ -42,6 +42,21 @@ def test_daily_supplement_alias_resolves(real_adapter, query, marker, calories, 
         assert item["macros"][key] == expected, f"「{query}」的 {key} 剂量不符"
 
 
+@pytest.mark.parametrize(
+    "query, calories",
+    [
+        ("Oats (燕麦片 15g)", 37.0),
+        ("Bread (法棍/吐司 50g/约2片)", 145.0),
+    ],
+)
+def test_breakfast_combo_items_have_config_anchors(real_adapter, query, calories):
+    """删掉组合声明值时，单项配置仍能给出相同的份量与热量。"""
+    item = real_adapter._apply_config_safeguard({"name": query})
+
+    assert item.get("_config_matched") is True
+    assert item["calories"] == calories
+
+
 class TestEnglishAliasScope:
     """英文别名必须开头锚定；规格不同要按比例折算，不能直接套用配置值。
 

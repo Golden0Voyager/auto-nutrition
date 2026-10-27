@@ -122,6 +122,30 @@ class TestLogToLocalJournal:
             "Food 2", "Food 3", "Food 0", "Food 1",
         ]
 
+    def test_retry_after_journal_write_failure_does_not_duplicate_archive(self, adapter):
+        """归档成功而 journal 写失败时，重试不得反复追加同一条旧记录。"""
+        adapter._JOURNAL_MAX_ENTRIES = 1
+        adapter._log_to_local_journal("2026-01-01", "Lunch", [{"name": "Old", "calories": 100}])
+
+        original_replace = os.replace
+        failed = False
+
+        def fail_journal_once(src, dst):
+            nonlocal failed
+            if not failed and dst == adapter.JOURNAL_FILE:
+                failed = True
+                raise OSError("simulated journal write failure")
+            return original_replace(src, dst)
+
+        with patch("mfp_adapter.os.replace", side_effect=fail_journal_once):
+            adapter._log_to_local_journal("2026-01-02", "Lunch", [{"name": "New", "calories": 200}])
+        adapter._log_to_local_journal("2026-01-02", "Lunch", [{"name": "New", "calories": 200}])
+
+        archive_file = os.path.join(os.path.dirname(adapter.JOURNAL_FILE), "nutrition_journal_archive.json")
+        with open(archive_file, encoding="utf-8") as f:
+            archive = json.load(f)
+        assert [entry["items"][0]["name"] for entry in archive] == ["Old"]
+
     def test_atomic_write_no_corruption(self, adapter):
         items = [{"name": "Apple", "calories": 95}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)

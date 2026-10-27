@@ -25,7 +25,7 @@ class TestRecordNutritionTool:
         with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
             from mfp_adapter import record_nutrition
             result = record_nutrition("2025-01-01", "lunch", [{"name": "Apple", "calories": 95}])
-            assert "注意" in result
+            assert "补录" in result
 
     def test_string_items(self, mock_get_adapter):
         mock_get_adapter.record_nutrition.return_value = {"status": "ok", "count": 1}
@@ -103,7 +103,7 @@ class TestRecordMealTool:
         with patch("mfp_adapter.get_adapter", return_value=mock_get_adapter):
             from mfp_adapter import record_meal
             result = record_meal("2025-01-01", "lunch", 1)
-            assert "注意" in result
+            assert "补录" in result
 
     def test_error(self, mock_get_adapter):
         mock_get_adapter.record_meal.side_effect = ValueError("未找到套餐「蛋白粉牛奶」。当前可用套餐: Milk Oatmeal(id=5083755153), Milk Protein Shake(id=5083761427)")
@@ -116,10 +116,19 @@ class TestRecordMealTool:
 
 
 class TestMealTimeWarnings:
-    def test_date_mismatch(self):
+    def test_old_date_has_one_specific_warning(self):
         from mfp_adapter import _meal_time_warnings
         warnings = _meal_time_warnings("2020-01-01", "lunch")
-        assert any("注意" in w for w in warnings)
+        assert len(warnings) == 1
+        assert "补录" in warnings[0]
+
+    def test_recent_date_mismatch_keeps_generic_warning(self):
+        from datetime import datetime, timedelta
+        from mfp_adapter import _meal_time_warnings
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        warnings = _meal_time_warnings(yesterday, "lunch")
+        assert len(warnings) == 1
+        assert "当前日期" in warnings[0]
 
     def test_meal_mismatch_uses_frozen_clock(self, monkeypatch):
         import datetime as dt

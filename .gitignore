@@ -14,6 +14,7 @@ test_user_input.py
 nutrition_journal.json
 nutrition_journal_archive.json
 food_cache.json
+.tmp/
 tmp/
 __pycache__/
 *.py[cod]
