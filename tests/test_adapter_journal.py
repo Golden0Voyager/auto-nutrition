@@ -161,6 +161,51 @@ class TestLogToLocalJournal:
             adapter._log_to_local_journal("2026-01-01", "Snack", items)
 
 
+class TestArchiveFailureKeepsJournal:
+    """归档出任何问题时都必须保留全部 journal 条目——宁可文件大，不可丢数据。"""
+
+    def _fill(self, adapter, count=4):
+        for i in range(count):
+            adapter._log_to_local_journal(
+                f"2026-01-0{i+1}", "Lunch", [{"name": f"Food {i}", "calories": 100}]
+            )
+
+    def test_corrupt_archive_file_keeps_all_entries(self, adapter):
+        adapter._JOURNAL_MAX_ENTRIES = 2
+        archive_file = os.path.join(
+            os.path.dirname(adapter.JOURNAL_FILE), "nutrition_journal_archive.json"
+        )
+        with open(archive_file, "w", encoding="utf-8") as f:
+            f.write("{ 这不是合法 JSON")
+
+        self._fill(adapter)
+
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert len(journal) == 4, "归档读不出来时不能截断 journal"
+
+    def test_archive_write_failure_keeps_all_entries(self, adapter):
+        adapter._JOURNAL_MAX_ENTRIES = 2
+        real_replace = os.replace
+
+        def flaky_replace(src, dst):
+            if str(dst).endswith("nutrition_journal_archive.json"):
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        with patch("mfp_adapter.os.replace", side_effect=flaky_replace):
+            self._fill(adapter)
+
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert len(journal) == 4, "归档写不进去时不能截断 journal"
+
+    def test_malformed_items_do_not_crash(self, adapter):
+        """items 不是 dict 时只记错误日志，不能把异常抛给调用方。"""
+        adapter._log_to_local_journal("2026-01-01", "Lunch", [None])
+        assert not os.path.exists(adapter.JOURNAL_FILE)
+
+
 class TestRemoveFromJournal:
     def test_removes_matching_item(self, adapter):
         adapter._log_to_local_journal("2026-10-23", "Breakfast", [{"name": "Oats", "calories": 300}])
