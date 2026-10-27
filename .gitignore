@@ -14,6 +14,8 @@ test_user_input.py
 nutrition_journal.json
 nutrition_journal_archive.json
 food_cache.json
+# _file_lock 用的独立锁文件：inode 必须稳定，绝不能提交也绝不能删
+*.json.lock
 .tmp/
 tmp/
 __pycache__/

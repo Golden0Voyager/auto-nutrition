@@ -124,6 +124,7 @@ class TestMealTimeWarnings:
 
     def test_recent_date_mismatch_keeps_generic_warning(self):
         from datetime import datetime, timedelta
+
         from mfp_adapter import _meal_time_warnings
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
         warnings = _meal_time_warnings(yesterday, "lunch")

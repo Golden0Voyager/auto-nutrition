@@ -8,10 +8,16 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
+
+try:  # pragma: no cover - 仅 Windows 缺失，本项目只跑 macOS / Linux
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 import requests
 import yaml
@@ -494,6 +500,60 @@ def _normalize_meal_name(text: str) -> str:
     return " ".join(str(text or "").split()).casefold()
 
 
+@contextmanager
+def _file_lock(lock_path: str, timeout: float = 10.0) -> Any:
+    """对 ``lock_path`` 加独占 flock，保护「读-改-写」不被并发覆盖。
+
+    为什么必须用**独立的锁文件**而不是锁目标文件：目标文件是
+    ``tempfile`` + ``os.replace`` 换出来的，inode 每次都变，锁在旧 inode 上
+    等于没锁。锁文件的 inode 从不变化，所以能一直锁住。
+
+    为什么需要它：``os.replace`` 只保证**文件不损坏**，不保证**不丢更新**。
+    两个进程同时「读-改-写」时，后写的会把先写的整份覆盖掉——实测 4 进程
+    各写 25 条 journal，只剩 25 条（丢 75%）。
+
+    拿不到锁（超过 ``timeout``）时只告警并继续，不阻塞录入：宁可偶发丢一条，
+    也不能因为锁文件异常让用户的记录整个写不进去。
+    """
+    if fcntl is None:  # pragma: no cover - Windows 退化路径
+        yield
+        return
+
+    directory = os.path.dirname(os.path.abspath(lock_path)) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # 句柄必须活过 yield（flock 绑在 fd 上），所以不能用 ``with open(...)``
+        # 直接包住临界区——交给 ExitStack 手动管理生命周期。
+        stack = ExitStack()
+        handle = stack.enter_context(open(lock_path, "a+", encoding="utf-8"))  # noqa: SIM115
+    except OSError as exc:
+        # 锁文件建不出来（目录只读等）时不能把调用方的写入一起挡掉：
+        # 无锁最坏是偶发丢一条，直接抛异常则是一条都写不进去。
+        logger.warning("无法创建文件锁（{}），本次不加锁继续执行: {}", lock_path, exc)
+        yield
+        return
+
+    locked = False
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    logger.warning("等待文件锁超时（{}），继续执行，本次可能有并发写风险", lock_path)
+                    break
+                time.sleep(0.02)
+        yield
+    finally:
+        if locked:
+            with suppress(OSError):  # pragma: no cover - 解锁失败不影响数据
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        stack.close()
+
+
 class MFPAdapter:
     """
     MyFitnessPal 适配器，负责维护会话并执行写入操作。
@@ -633,32 +693,45 @@ class MFPAdapter:
         # 不加会被 bandit B324 判为弱哈希（CI 直接红）。
         return hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()
 
+    def _read_food_cache_file(self) -> dict[str, Any]:
+        """从磁盘读缓存条目（不碰 ``self._food_cache``）；文件损坏按空处理。"""
+        try:
+            if not os.path.exists(self.FOOD_CACHE_FILE):
+                return {}
+            with open(self.FOOD_CACHE_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            entries = data.get("entries") or {}
+            return entries if isinstance(entries, dict) else {}
+        except Exception as exc:
+            logger.warning("食物缓存读取失败，按空缓存处理: {}", exc)
+            return {}
+
     def _load_food_cache(self) -> dict[str, Any]:
         """懒加载本地食物缓存；文件损坏时按空缓存处理，绝不影响录入。"""
         cached = getattr(self, "_food_cache", None)
         if cached is not None:
             return cached
-        try:
-            if os.path.exists(self.FOOD_CACHE_FILE):
-                with open(self.FOOD_CACHE_FILE, encoding="utf-8") as f:
-                    data = json.load(f)
-                self._food_cache = data.get("entries") or {}
-            else:
-                self._food_cache = {}
-        except Exception as exc:
-            logger.warning("食物缓存读取失败，按空缓存处理: {}", exc)
-            self._food_cache = {}
+        self._food_cache = self._read_food_cache_file()
         return self._food_cache
 
     def _save_food_cache(self) -> None:
-        """原子写回缓存。失败只告警——缓存是优化项，不能连累录入。"""
+        """写回缓存。失败只告警——缓存是优化项，不能连累录入。
+
+        并发保护：必须「加锁 → 重读磁盘 → 合并 → 写回」。直接拿内存里的
+        快照覆盖磁盘会把别的进程刚新建的条目整份抹掉（实测 4 进程并发
+        丢 75%）。条目只增不删，所以按 key 合并是安全的。
+        """
         try:
-            with tempfile.NamedTemporaryFile(
-                "w", delete=False, dir=os.path.dirname(self.FOOD_CACHE_FILE), encoding="utf-8"
-            ) as tf:
-                json.dump({"version": 1, "entries": self._food_cache or {}}, tf, indent=2, ensure_ascii=False)
-                temp_name = tf.name
-            os.replace(temp_name, self.FOOD_CACHE_FILE)
+            with _file_lock(self.FOOD_CACHE_FILE + ".lock"):
+                merged = self._read_food_cache_file()
+                merged.update(self._food_cache or {})
+                with tempfile.NamedTemporaryFile(
+                    "w", delete=False, dir=os.path.dirname(self.FOOD_CACHE_FILE), encoding="utf-8"
+                ) as tf:
+                    json.dump({"version": 1, "entries": merged}, tf, indent=2, ensure_ascii=False)
+                    temp_name = tf.name
+                os.replace(temp_name, self.FOOD_CACHE_FILE)
+                self._food_cache = merged
         except Exception as exc:
             logger.warning("食物缓存写入失败（不影响本次录入）: {}", exc)
 
@@ -1925,14 +1998,16 @@ class MFPAdapter:
 
     def remove_journal_group(self, date_str: str, group_id: str) -> bool:
         """从 journal 移除一个套餐组；找不到时返回 False。"""
-        journal = self._read_journal()
-        kept = [
-            e for e in journal
-            if not (e.get("date") == date_str and e.get("group_id") == group_id)
-        ]
-        if len(kept) == len(journal):
-            return False
-        return self._write_journal(kept)
+        # 与 _remove_from_journal 同理：「读 → 过滤 → 写」不加锁会把并发写入的条目抹掉。
+        with _file_lock(self.JOURNAL_FILE + ".lock"):
+            journal = self._read_journal()
+            kept = [
+                e for e in journal
+                if not (e.get("date") == date_str and e.get("group_id") == group_id)
+            ]
+            if len(kept) == len(journal):
+                return False
+            return self._write_journal(kept)
 
     def _remove_from_journal(self, date_str: str, meal_name: str, item_name: str) -> int:
         """
@@ -1948,43 +2023,32 @@ class MFPAdapter:
         target = _normalize_entry_name(item_name).casefold()
         if not target:
             return 0
-        if not os.path.exists(self.JOURNAL_FILE):
-            return 0
-        try:
-            with open(self.JOURNAL_FILE, encoding="utf-8") as f:
-                journal = json.load(f)
-        except Exception as e:
-            logger.error("读取本地日志失败，跳过同步: {}", e)
-            return 0
+        # 「读 → 删 → 写」必须整体加锁：否则删除期间别的进程刚写入的记录会被
+        # 这份旧快照整份覆盖掉（删除反而变成丢数据的放大器）。
+        with _file_lock(self.JOURNAL_FILE + ".lock"):
+            journal = self._read_journal()
 
-        removed = 0
-        for entry in reversed(journal):
-            if entry.get("date") != date_str or entry.get("meal_name") != meal_name:
-                continue
-            for item in reversed(entry.get("items", [])):
-                if _normalize_entry_name(item.get("name", "")).casefold() == target:
-                    entry["items"].remove(item)
-                    removed = 1
+            removed = 0
+            for entry in reversed(journal):
+                if entry.get("date") != date_str or entry.get("meal_name") != meal_name:
+                    continue
+                for item in reversed(entry.get("items", [])):
+                    if _normalize_entry_name(item.get("name", "")).casefold() == target:
+                        entry["items"].remove(item)
+                        removed = 1
+                        break
+                if removed:
                     break
-            if removed:
-                break
 
-        if not removed:
-            return 0
+            if not removed:
+                return 0
 
-        journal = [e for e in journal if e.get("items")]
-        try:
-            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
-                json.dump(journal, tf, indent=2, ensure_ascii=False)
-                temp_name = tf.name
-            os.replace(temp_name, self.JOURNAL_FILE)
+            journal = [e for e in journal if e.get("items")]
+            if not self._write_journal(journal):
+                logger.error("本地日志同步删除失败，跳过同步: {} / {}", meal_name, item_name)
+                return 0
             logger.info("本地日志已同步删除: {} / {}", meal_name, item_name)
-        except Exception as e:
-            logger.error("本地日志同步删除失败: {}", e)
-            if 'temp_name' in locals() and os.path.exists(temp_name):
-                os.remove(temp_name)
-            return 0
-        return removed
+            return removed
 
     def _archive_journal_entries(self, entries: list[dict[str, Any]]) -> bool:
         """把超出保留窗口的旧记录追加到归档文件，返回是否成功。
@@ -2001,38 +2065,44 @@ class MFPAdapter:
             archive_file = os.path.join(journal_dir, os.path.basename(archive_file))
 
         archive: list[dict[str, Any]] = []
-        if os.path.exists(archive_file):
+        # 归档同样是「读 → 追加 → 写」，并发下会互相覆盖，必须单独加锁。
+        # 锁序固定为 journal → archive（只有 _log_to_local_journal 会进到这里），
+        # 不存在反向获取，不会死锁。
+        with _file_lock(archive_file + ".lock"):
+            if os.path.exists(archive_file):
+                try:
+                    with open(archive_file, encoding="utf-8") as f:
+                        loaded = json.load(f)
+                    archive = loaded if isinstance(loaded, list) else []
+                except Exception as exc:
+                    logger.error("读取日志归档失败（本次不归档，保留原日志）: {}", exc)
+                    return False
+
+            # 归档成功但 journal 写失败后重试会重复送同一批 entries，
+            # 按内容指纹幂等，避免同一批旧记录被反复追加。
+            def fingerprint(entry: dict[str, Any]) -> str:
+                return json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+            archived = {fingerprint(entry) for entry in archive}
+            new_entries = [entry for entry in entries if fingerprint(entry) not in archived]
+            if not new_entries:
+                logger.info("日志归档: {} 条均已存在，跳过重复写入", len(entries))
+                return True
+
+            archive.extend(new_entries)
+            temp_name = ""
             try:
-                with open(archive_file, encoding="utf-8") as f:
-                    loaded = json.load(f)
-                archive = loaded if isinstance(loaded, list) else []
+                with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(archive_file) or ".", encoding="utf-8") as tf:
+                    json.dump(archive, tf, indent=2, ensure_ascii=False)
+                    temp_name = tf.name
+                os.replace(temp_name, archive_file)
+                logger.info("日志归档: {} 条转存 {}（累计 {} 条）", len(new_entries), os.path.basename(archive_file), len(archive))
+                return True
             except Exception as exc:
-                logger.error("读取日志归档失败（本次不归档，保留原日志）: {}", exc)
+                logger.error("写日志归档失败（本次不归档，保留原日志）: {}", exc)
+                if temp_name and os.path.exists(temp_name):
+                    os.remove(temp_name)
                 return False
-
-        def fingerprint(entry: dict[str, Any]) -> str:
-            return json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-
-        archived = {fingerprint(entry) for entry in archive}
-        new_entries = [entry for entry in entries if fingerprint(entry) not in archived]
-        if not new_entries:
-            logger.info("日志归档: {} 条均已存在，跳过重复写入", len(entries))
-            return True
-
-        archive.extend(new_entries)
-        temp_name = ""
-        try:
-            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(archive_file) or ".", encoding="utf-8") as tf:
-                json.dump(archive, tf, indent=2, ensure_ascii=False)
-                temp_name = tf.name
-            os.replace(temp_name, archive_file)
-            logger.info("日志归档: {} 条转存 {}（累计 {} 条）", len(new_entries), os.path.basename(archive_file), len(archive))
-            return True
-        except Exception as exc:
-            logger.error("写日志归档失败（本次不归档，保留原日志）: {}", exc)
-            if temp_name and os.path.exists(temp_name):
-                os.remove(temp_name)
-            return False
 
     def _log_to_local_journal(
         self,
@@ -2047,57 +2117,56 @@ class MFPAdapter:
         写入前自动清理内部字段和 None 值以节省空间。
 
         group_id 仅 record_meal 使用：一次套餐写入 = 一组，供整组撤销定位。
+
+        并发保护：整个「读 → append → 归档 → 写」包在文件锁里。原子替换只保证
+        文件不损坏，不保证不丢更新——两个进程同时读同一份快照、各自 append、
+        各自替换，后写的会把先写的整份抹掉。journal 丢了补剂记录还会连带让
+        幂等检查误判「今天没记过」，下一次定时任务就重复写入 MFP。
         """
         try:
-            journal = []
-            if os.path.exists(self.JOURNAL_FILE):
-                with open(self.JOURNAL_FILE, encoding="utf-8") as f:
-                    journal = json.load(f)
+            with _file_lock(self.JOURNAL_FILE + ".lock"):
+                journal = self._read_journal()
 
-            # 清理 items：去掉内部字段和 None 值
-            def _clean_item(item: dict[str, Any]) -> dict[str, Any]:
-                cleaned = {}
-                for k, v in item.items():
-                    if k.startswith("_"):
-                        continue
-                    if v is None:
-                        continue
-                    if isinstance(v, dict):
-                        v = {sk: sv for sk, sv in v.items() if sv is not None}
-                        if not v:
+                # 清理 items：去掉内部字段和 None 值
+                def _clean_item(item: dict[str, Any]) -> dict[str, Any]:
+                    cleaned = {}
+                    for k, v in item.items():
+                        if k.startswith("_"):
                             continue
-                    cleaned[k] = v
-                return cleaned
+                        if v is None:
+                            continue
+                        if isinstance(v, dict):
+                            v = {sk: sv for sk, sv in v.items() if sv is not None}
+                            if not v:
+                                continue
+                        cleaned[k] = v
+                    return cleaned
 
-            # 日志条目结构
-            entry = {
-                "timestamp": datetime.now().isoformat(),
-                "date": date_str,
-                "meal_name": meal_name,
-                "items": [_clean_item(it) for it in items]
-            }
-            if group_id:
-                entry["group_id"] = group_id
-            journal.append(entry)
+                # 日志条目结构
+                entry = {
+                    "timestamp": datetime.now().isoformat(),
+                    "date": date_str,
+                    "meal_name": meal_name,
+                    "items": [_clean_item(it) for it in items]
+                }
+                if group_id:
+                    entry["group_id"] = group_id
+                journal.append(entry)
 
-            # 超出保留窗口的旧记录转存归档，不丢弃（趋势分析需要完整历史）
-            if len(journal) > self._JOURNAL_MAX_ENTRIES:
-                overflow = journal[:-self._JOURNAL_MAX_ENTRIES]
-                if self._archive_journal_entries(overflow):
-                    journal = journal[-self._JOURNAL_MAX_ENTRIES:]
-                else:
-                    logger.warning("归档失败，保留全部 {} 条（本次不截断）", len(journal))
+                # 超出保留窗口的旧记录转存归档，不丢弃（趋势分析需要完整历史）
+                if len(journal) > self._JOURNAL_MAX_ENTRIES:
+                    overflow = journal[:-self._JOURNAL_MAX_ENTRIES]
+                    if self._archive_journal_entries(overflow):
+                        journal = journal[-self._JOURNAL_MAX_ENTRIES:]
+                    else:
+                        logger.warning("归档失败，保留全部 {} 条（本次不截断）", len(journal))
 
-            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
-                json.dump(journal, tf, indent=2, ensure_ascii=False)
-                temp_name = tf.name
-
-            os.replace(temp_name, self.JOURNAL_FILE)
-            logger.info("本地高保真日志已原子录入 ({}, {} items)", len(items), len(json.dumps(entry, ensure_ascii=False)))
+                if not self._write_journal(journal):
+                    logger.error("本地日志原子录入失败: 写回失败")
+                    return
+                logger.info("本地高保真日志已原子录入 ({}, {} items)", len(items), len(json.dumps(entry, ensure_ascii=False)))
         except Exception as e:
             logger.error("本地日志原子录入失败: {}", e)
-            if 'temp_name' in locals() and os.path.exists(temp_name):
-                os.remove(temp_name)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def get_food_entries_from_html(self, date_str: str) -> list:
