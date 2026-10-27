@@ -12,6 +12,8 @@ cookies.json
 .pdca-status.json
 test_user_input.py
 nutrition_journal.json
+nutrition_journal_archive.json
+food_cache.json
 tmp/
 __pycache__/
 *.py[cod]

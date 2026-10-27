@@ -1,4 +1,5 @@
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -504,12 +505,25 @@ class MFPAdapter:
     MEALS_URL = "https://www.myfitnesspal.com/api/services/users/meals/mine"
     COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
     JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutrition_journal.json")
+    # 超出保留窗口的旧记录转存到这里，不丢弃（趋势分析需要完整历史）。
+    # 实际路径跟随 JOURNAL_FILE 所在目录，便于测试把两个文件一起放进 tmp_path。
+    JOURNAL_ARCHIVE_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "nutrition_journal_archive.json"
+    )
+    # 自定义食物复用缓存：归一化名称 → {id, version, calories}，避免每次写入都新建一条食物。
+    # 键只含名称（不含营养值/份量）：份量靠日记条目的 servings 倍数表达，
+    # 见 _food_cache_key 的说明。
+    FOOD_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "food_cache.json")
+    FOODS_MINE_URL = "https://www.myfitnesspal.com/api/services/users/foods/mine"
 
     def __init__(self, username: str | None = None):
         self.BASE_URL = "https://api.myfitnesspal.com/v2"
+        self._food_cache: dict[str, Any] | None = None
         # 使用类属性定义的绝对路径，确保日志始终写入项目目录
         self.JOURNAL_FILE = self.__class__.JOURNAL_FILE
-        self._JOURNAL_MAX_ENTRIES = 200
+        # 保留窗口从 200（约 10 天）提到 2000（约 500 天）；超出的旧记录转存归档，
+        # 不再静默丢弃——否则「长期趋势」这条立项目标会在第 50 天自动失效。
+        self._JOURNAL_MAX_ENTRIES = 2000
         self.usda = USDALocalResolver()
         self.session = requests.Session()
         self.session.headers.update({
@@ -599,8 +613,50 @@ class MFPAdapter:
         if not self.access_token:
             raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `get_cookie_guide` 获取教程，再用 `import_cookies` 导入凭据。")
 
+    def _food_cache_key(self, item: dict[str, Any]) -> str:
+        """食物指纹 = 归一化名称。
+
+        一条食物只存「1 份基准值」，不同份量通过日记条目的 ``servings`` 倍数表达，
+        所以份量不参与指纹——同名的不同份量必须落到同一条食物上，否则又会按份量
+        各建一条（这正是食物库膨胀的根因）。名称折叠空白并 casefold，
+        `Black Coffee` 与 `black coffee` 视为同一种食物。
+        """
+        name = " ".join(str(item.get("description", "")).split()).casefold()
+        # usedforsecurity=False：这只是本地缓存指纹，不用于任何安全用途。
+        # 不加会被 bandit B324 判为弱哈希（CI 直接红）。
+        return hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()
+
+    def _load_food_cache(self) -> dict[str, Any]:
+        """懒加载本地食物缓存；文件损坏时按空缓存处理，绝不影响录入。"""
+        cached = getattr(self, "_food_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            if os.path.exists(self.FOOD_CACHE_FILE):
+                with open(self.FOOD_CACHE_FILE, encoding="utf-8") as f:
+                    data = json.load(f)
+                self._food_cache = data.get("entries") or {}
+            else:
+                self._food_cache = {}
+        except Exception as exc:
+            logger.warning("食物缓存读取失败，按空缓存处理: {}", exc)
+            self._food_cache = {}
+        return self._food_cache
+
+    def _save_food_cache(self) -> None:
+        """原子写回缓存。失败只告警——缓存是优化项，不能连累录入。"""
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", delete=False, dir=os.path.dirname(self.FOOD_CACHE_FILE), encoding="utf-8"
+            ) as tf:
+                json.dump({"version": 1, "entries": self._food_cache or {}}, tf, indent=2, ensure_ascii=False)
+                temp_name = tf.name
+            os.replace(temp_name, self.FOOD_CACHE_FILE)
+        except Exception as exc:
+            logger.warning("食物缓存写入失败（不影响本次录入）: {}", exc)
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
-    def _create_custom_food(self, item: dict[str, Any]) -> dict[str, str]:
+    def _create_custom_food(self, item: dict[str, Any], force_new: bool = False) -> dict[str, Any]:
         nutritional_contents = {
             "energy": {"unit": "calories", "value": item.get("calories", 0)},
         }
@@ -641,12 +697,102 @@ class MFPAdapter:
             }
         }
         micro_count = len([k for k in nutritional_contents if k != "energy"])
+        cache = self._load_food_cache()
+        cache_key = self._food_cache_key(food_payload["item"])
+
+        # 命中缓存 → 直接复用已有食物 id，不再 POST 新建（这是食物库膨胀的根因）
+        if not force_new:
+            hit = cache.get(cache_key)
+            if hit and hit.get("id") and hit.get("version") is not None:
+                base = float(hit.get("calories") or 0)
+                wanted = float(item.get("calories") or 0)
+                # 只有「零卡性一致」才能复用：份量靠 servings 倍数表达，
+                # 而 0 kcal 无法用倍数表达（0 × n 恒为 0）。两种错配都必须重建：
+                #   缓存 0 → 本次 >0：第一次是 Level 4 兜底/误匹配记成 0，
+                #     继续复用会让同一名字永远写 0（实测踩到，静默丢数据）。
+                #   缓存 >0 → 本次 0：servings 退化为 1 份，会把基准热量写进去。
+                if (base > 0) == (wanted > 0):
+                    logger.info('食物复用: "{name}" → id={id}（未新建）', name=item["name"], id=hit["id"])
+                    return {
+                        "id": hit["id"],
+                        "version": hit["version"],
+                        "cached": True,
+                        "base_calories": hit.get("calories"),
+                    }
+                logger.warning(
+                    '缓存基准与本次热量对不上（缓存 {:.0f} / 本次 {:.0f} kcal），重建食物: "{}"',
+                    base, wanted, item["name"],
+                )
+
         logger.info("MFP Food Payload ({} micros): {}", micro_count, json.dumps(food_payload, indent=2, ensure_ascii=False))
         response = self.session.post(f"{self.BASE_URL}/foods", json=food_payload)
         response.raise_for_status()
         data = response.json()
         food_info = data["items"][0] if "items" in data else data["item"]
-        return {"id": food_info["id"], "version": food_info["version"]}
+
+        cache[cache_key] = {
+            "id": food_info["id"],
+            "version": food_info["version"],
+            "name": item["name"],
+            "calories": item.get("calories"),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._save_food_cache()
+        return {
+            "id": food_info["id"],
+            "version": food_info["version"],
+            "cached": False,
+            "base_calories": item.get("calories"),
+        }
+
+    def _servings_for(self, item: dict[str, Any], food_ref: dict[str, Any]) -> float:
+        """份量倍数 = 本次实际热量 / 该食物「1 份基准」热量。
+
+        同一种食物无论吃多少，都复用同一条食物，只把倍数写进日记条目。
+        基准为 0（补剂/零卡）或本次为 0 时退化为 1 份。
+        """
+        base = float(food_ref.get("base_calories") or 0)
+        calories = float(item.get("calories") or 0)
+        if base <= 0 or calories <= 0:
+            return 1.0
+        return max(round(calories / base, 2), 0.01)
+
+    def _food_entry_payload(
+        self, date_str: str, meal_name: str, food_ref: dict[str, Any], servings: float = 1.0
+    ) -> dict[str, Any]:
+        return {
+            "type": "food_entry",
+            "date": date_str,
+            "meal_name": meal_name,
+            "food": {"id": food_ref["id"], "version": food_ref["version"]},
+            "servings": servings,
+            "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
+            "client_id": "mfp-main-js",
+        }
+
+    def _write_food_entry(
+        self,
+        date_str: str,
+        meal_name: str,
+        item: dict[str, Any],
+        verify: Callable[[], bool] | None = None,
+    ) -> None:
+        """建食物 + 写日记一条。复用缓存食物被 API 拒绝时，重建该食物再试一次。"""
+        food_ref = self._create_custom_food(item)
+        servings = self._servings_for(item, food_ref)
+        try:
+            self._post_diary_entry(
+                self._food_entry_payload(date_str, meal_name, food_ref, servings), verify=verify
+            )
+        except requests.exceptions.HTTPError:
+            if not food_ref.get("cached"):
+                raise
+            logger.warning('复用的食物被 API 拒绝，重建后重试: "{}"', item["name"])
+            food_ref = self._create_custom_food(item, force_new=True)
+            servings = self._servings_for(item, food_ref)
+            self._post_diary_entry(
+                self._food_entry_payload(date_str, meal_name, food_ref, servings), verify=verify
+            )
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=4), retry=retry_if_exception(is_server_error))
     def get_water(self, date_str: str) -> float:
@@ -920,6 +1066,91 @@ class MFPAdapter:
         safe_item["_config_matched"] = True
         return safe_item
 
+    # 合理性闸门阈值：USDA/AI 给出的单条数值超过这些线，基本可判定为误匹配。
+    SANITY_MAX_KCAL = 1200.0
+    SANITY_MACRO_TOLERANCE = 0.25
+    # USDA 值超过 AI 估算的这个倍数 → 多半是「按 100g 语义命中大份量条目」
+    SANITY_USDA_AI_RATIO = 1.5
+    # 未注明克重却命中 >350 kcal/份 → 多半把「每 100g」当成了「1 份」
+    SANITY_IMPLICIT_100G_KCAL = 350.0
+
+    @staticmethod
+    def _macro_energy_gap(calories: float | None, macros: dict[str, Any] | None) -> float | None:
+        """宏量反推热量（4P+4C+9F）与标称热量的相对偏差。
+
+        宏量缺失或全为 0 时返回 None（无法判断，交给闸门放行）。
+        """
+        if not calories or not macros:
+            return None
+        # ai_macros 可能是 Pydantic 模型而非 dict，无法取值时直接放行
+        if not isinstance(macros, dict):
+            return None
+        try:
+            protein = float(macros.get("protein") or 0)
+            carbs = float(macros.get("carbs") or 0)
+            fat = float(macros.get("fat") or 0)
+        except (TypeError, ValueError):
+            return None
+        if protein <= 0 and carbs <= 0 and fat <= 0:
+            return None
+        estimated = 4 * protein + 4 * carbs + 9 * fat
+        return abs(estimated - float(calories)) / max(float(calories), estimated)
+
+    def _sanity_reject_reason(self, item: dict[str, Any]) -> str | None:
+        """单条营养数据是否离谱；返回 None 表示通过。
+
+        两类已知误匹配：USDA 按 100g 语义命中大份量条目（热量爆炸），
+        以及热量与三大宏量互相对不上（如 440 kcal 配 44g 脂肪 + 10g 蛋白）。
+        """
+        calories = float(item.get("calories") or 0)
+        if calories > self.SANITY_MAX_KCAL:
+            return f"单条 {calories:.0f} kcal 超过 {self.SANITY_MAX_KCAL:.0f} kcal 上限"
+        gap = self._macro_energy_gap(calories, item.get("macros"))
+        if gap is not None and gap > self.SANITY_MACRO_TOLERANCE:
+            return f"宏量反推热量与标称值偏差 {gap:.0%}"
+        return None
+
+    def _has_explicit_size(self, item: dict[str, Any]) -> bool:
+        """这一条是否带真实规格（g / ml / oz / kg / l）。
+
+        规格可能出现在两处：``name`` 里（dict 输入，AI 常把「100g 鸡胸肉」整个
+        当名字传），或 ``display_qty`` 里（字符串输入被 ``_parse_quantity`` 剥出来）。
+        两处都要看——只看 ``display_qty`` 会漏掉 dict 路径，而那才是主路径。
+        """
+        return (
+            _size_spec(str(item.get("name") or "")) is not None
+            or _size_spec(str(item.get("display_qty") or "")) is not None
+        )
+
+    def _implicit_100g_reason(self, item: dict[str, Any]) -> str | None:
+        """未给克重、却命中 >350 kcal/份 的条目：多半把「每 100g」当成了「1 份」。
+
+        用户写了 100g/ml 时 USDA 的 per-100g 换算是对的，不做判断。
+        """
+        if self._has_explicit_size(item):
+            return None
+        calories = float(item.get("calories") or 0)
+        if calories > self.SANITY_IMPLICIT_100G_KCAL:
+            return f"未注明克重，按 100g 命中 {calories:.0f} kcal/份，疑似份量错配"
+        return None
+
+    def _usda_overestimate_reason(self, usda_calories: float | None, ai_calories: float | None) -> str | None:
+        """USDA 值远高于 AI 估算时的说明；不构成高估则返回 None。
+
+        典型场景：用户说「小鸡腿 1 个」，USDA 按 100g 语义命中 440 kcal 的条目，
+        而 AI 按「一个」估 115 kcal。倍数判定比绝对阈值更贴近这类错误。
+
+        **给了真实规格时一律不判**：``100g 花生`` 的 USDA 567 kcal 是对的，AI 估
+        300 只是低估，此时拿 AI 覆盖 USDA 会直接把正确值改错（实测踩到）。
+        规格换算的权威性高于 AI 心算，所以这条闸门对带规格的输入完全让路。
+        """
+        if not usda_calories or not ai_calories or float(ai_calories) <= 0:
+            return None
+        ratio = float(usda_calories) / float(ai_calories)
+        if ratio > self.SANITY_USDA_AI_RATIO:
+            return f"USDA {float(usda_calories):.0f} kcal 是 AI 估算 {float(ai_calories):.0f} kcal 的 {ratio:.1f} 倍"
+        return None
+
     def _parse_quantity(self, text: str) -> tuple[float, str, str]:
         """Parse quantity, unit, and food name from a string.
 
@@ -1061,6 +1292,8 @@ class MFPAdapter:
         config_conflicts: list[dict[str, Any]] = []
         # 未匹配且名称含中文的条目：USDA 只索引英文，需要提示改英文名重录
         non_english_misses: list[str] = []
+        # 通过合理性闸门失败、但仍被写入的条目（营养数据自相矛盾）
+        suspect_items: list[str] = []
         # 同餐次重名提示：复用已取到的基线，零额外请求
         same_meal_before: set[str] = set()
         same_meal_duplicates: list[str] = []
@@ -1128,6 +1361,34 @@ class MFPAdapter:
                 except Exception as e:
                     logger.warning("Level 2 | USDA 搜索异常: {}", e)
 
+            # Level 2.5: 合理性闸门 — USDA 只按名称取 top-1，不做语义校验，
+            # 常把「小鸡腿」匹配成 440 kcal / 44g 脂肪之类的条目。命中可疑值时：
+            # 有 AI 估算就退回 AI；没有就照写但标记可疑并在返回里告警（不静默）。
+            # 配置命中与套餐声明值不受此限——那是用户自己定的数。
+            if not config_matched and not declared and item.get("calories"):
+                reason = self._sanity_reject_reason(item)
+                if not reason:
+                    reason = self._implicit_100g_reason(item)
+                # 带真实规格（100g / 250ml …）时不让 AI 估算推翻 USDA——
+                # per-100g 换算比 AI 心算可靠，否则「100g 鸡胸肉」会被估低三成。
+                if not reason and ai_calories and not self._has_explicit_size(item):
+                    reason = self._usda_overestimate_reason(item.get("calories"), ai_calories)
+                if reason:
+                    if ai_calories:
+                        logger.warning(
+                            'Level 2.5 | USDA 结果不可信，改用 AI 估算: "{}" — {}',
+                            item["name"], reason,
+                        )
+                        item["calories"] = None
+                        item["macros"] = {}
+                    else:
+                        logger.warning(
+                            'Level 2.5 | ⚠️ 营养数据自相矛盾，请核对: "{}" — {}',
+                            item["name"], reason,
+                        )
+                        item["_suspect"] = reason
+                        suspect_items.append(f'{item["name"]}（{reason}）')
+
             # Level 3: AI 预填值 — 配置和 USDA 都未命中时，使用 AI 估算作为 fallback
             if (item.get("calories") is None or item.get("calories", 0) == 0) and ai_calories:
                 item["calories"] = ai_calories
@@ -1138,6 +1399,23 @@ class MFPAdapter:
                     else:
                         item["macros"] = ai_macros
                 logger.info("Level 3 | 使用 AI 估算数据: {} ({} kcal)", item["name"], ai_calories)
+
+            # Level 3.5: AI 估算同样过闸门，只告警不降级（已无更可信来源）
+            if (
+                ai_calories
+                and not config_matched
+                and not item.get("_suspect")
+                and not item.get("_unmatched")
+                and item.get("calories") == ai_calories
+            ):
+                reason = self._sanity_reject_reason(item)
+                if reason:
+                    logger.warning(
+                        'Level 3.5 | ⚠️ AI 估算自相矛盾，请核对: "{}" — {}',
+                        item["name"], reason,
+                    )
+                    item["_suspect"] = reason
+                    suspect_items.append(f'{item["name"]}（{reason}，AI 估算）')
 
             # Level 4: 兜底 — 所有数据源均未命中，标记警告
             if item.get("calories") is None or item.get("calories", 0) == 0:
@@ -1164,17 +1442,7 @@ class MFPAdapter:
 
             try:
                 time.sleep(0.5)
-                food_ref = self._create_custom_food(item)
-                diary_entry = {
-                    "type": "food_entry",
-                    "date": date_str,
-                    "meal_name": meal_name,
-                    "food": {"id": food_ref["id"], "version": food_ref["version"]},
-                    "servings": 1.0,
-                    "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
-                    "client_id": "mfp-main-js"
-                }
-                self._post_diary_entry(diary_entry, verify=partial(_verify_written, item["name"]))
+                self._write_food_entry(date_str, meal_name, item, verify=partial(_verify_written, item["name"]))
                 if diary_snapshot is not None:
                     diary_snapshot.append((meal_name, item["name"]))
                 written_items.append(item)
@@ -1201,6 +1469,13 @@ class MFPAdapter:
                 f'💡 其中含中文名的 {len(non_english_misses)} 条 USDA 检索不到'
                 f'（中文词表只覆盖常见食材）：请改用英文名重录，'
                 f'如 "Oats" / "Chicken breast" / "Avocado"；'
+                f'或把该食物加到 supplements_config.yaml 作为配置锚点。'
+            )
+        if suspect_items:
+            warnings.append(
+                f'⚠️ 以下条目的营养数据自相矛盾（热量与宏量对不上，或单条热量异常高），'
+                f'已照写但请核对: {"; ".join(suspect_items)}。'
+                f'修正办法：用 delete_entry 删掉后按实测值重录，'
                 f'或把该食物加到 supplements_config.yaml 作为配置锚点。'
             )
         if same_meal_duplicates:
@@ -1446,18 +1721,10 @@ class MFPAdapter:
 
             try:
                 time.sleep(0.5)
-                food_ref = self._create_custom_food(item)
-                diary_entry = {
-                    "type": "food_entry",
-                    "date": date_str,
-                    "meal_name": meal_name,
-                    "food": {"id": food_ref["id"], "version": food_ref["version"]},
-                    "servings": 1.0,
-                    "serving_size": {"value": 1.0, "unit": "serving(s)", "nutrition_multiplier": 1.0},
-                    "client_id": "mfp-main-js"
-                }
-                self._post_diary_entry(
-                    diary_entry,
+                self._write_food_entry(
+                    date_str,
+                    meal_name,
+                    item,
                     verify=partial(
                         self._verify_item_written, date_str, meal_name, item["name"], diary_snapshot
                     ),
@@ -1699,6 +1966,44 @@ class MFPAdapter:
             return 0
         return removed
 
+    def _archive_journal_entries(self, entries: list[dict[str, Any]]) -> bool:
+        """把超出保留窗口的旧记录追加到归档文件，返回是否成功。
+
+        归档失败时返回 False，调用方保留原日志（宁可文件大，不可丢数据）。
+        归档路径跟随 JOURNAL_FILE 所在目录，测试改 JOURNAL_FILE 时自动隔离。
+        """
+        if not entries:
+            return True
+        archive_file = self.JOURNAL_ARCHIVE_FILE
+        journal_dir = os.path.dirname(os.path.abspath(self.JOURNAL_FILE)) or "."
+        if os.path.dirname(os.path.abspath(archive_file)) != journal_dir:
+            archive_file = os.path.join(journal_dir, os.path.basename(archive_file))
+
+        archive: list[dict[str, Any]] = []
+        if os.path.exists(archive_file):
+            try:
+                with open(archive_file, encoding="utf-8") as f:
+                    loaded = json.load(f)
+                archive = loaded if isinstance(loaded, list) else []
+            except Exception as exc:
+                logger.error("读取日志归档失败（本次不归档，保留原日志）: {}", exc)
+                return False
+
+        archive.extend(entries)
+        temp_name = ""
+        try:
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(archive_file) or ".", encoding="utf-8") as tf:
+                json.dump(archive, tf, indent=2, ensure_ascii=False)
+                temp_name = tf.name
+            os.replace(temp_name, archive_file)
+            logger.info("日志归档: {} 条转存 {}（累计 {} 条）", len(entries), os.path.basename(archive_file), len(archive))
+            return True
+        except Exception as exc:
+            logger.error("写日志归档失败（本次不归档，保留原日志）: {}", exc)
+            if temp_name and os.path.exists(temp_name):
+                os.remove(temp_name)
+            return False
+
     def _log_to_local_journal(
         self,
         date_str: str,
@@ -1745,9 +2050,13 @@ class MFPAdapter:
                 entry["group_id"] = group_id
             journal.append(entry)
 
-            # 保持近期日志 (保留最近 200 条，约 10 天的完整记录)
+            # 超出保留窗口的旧记录转存归档，不丢弃（趋势分析需要完整历史）
             if len(journal) > self._JOURNAL_MAX_ENTRIES:
-                journal = journal[-self._JOURNAL_MAX_ENTRIES:]
+                overflow = journal[:-self._JOURNAL_MAX_ENTRIES]
+                if self._archive_journal_entries(overflow):
+                    journal = journal[-self._JOURNAL_MAX_ENTRIES:]
+                else:
+                    logger.warning("归档失败，保留全部 {} 条（本次不截断）", len(journal))
 
             with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(self.JOURNAL_FILE), encoding="utf-8") as tf:
                 json.dump(journal, tf, indent=2, ensure_ascii=False)
