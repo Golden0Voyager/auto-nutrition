@@ -52,6 +52,8 @@ def adapter(tmp_path):
     a = MFPAdapter.__new__(MFPAdapter)
     a.BASE_URL = "https://api.myfitnesspal.com/v2"
     a.JOURNAL_FILE = str(tmp_path / "journal.json")
+    a.FOOD_CACHE_FILE = str(tmp_path / "food_cache.json")
+    a._food_cache = None
     a._JOURNAL_MAX_ENTRIES = 200
     a.usda = MagicMock()
     a.usda.search.return_value = []

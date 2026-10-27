@@ -14,6 +14,8 @@ def adapter_with_config(tmp_path):
     a = MFPAdapter.__new__(MFPAdapter)
     a.BASE_URL = "https://api.myfitnesspal.com/v2"
     a.JOURNAL_FILE = str(tmp_path / "journal.json")
+    a.FOOD_CACHE_FILE = str(tmp_path / "food_cache.json")
+    a._food_cache = None
     a._JOURNAL_MAX_ENTRIES = 200
     a.usda = MagicMock()
     a.usda.search.return_value = []
@@ -681,3 +683,261 @@ class TestRecordNutritionAiMacrosNonDict:
             items = [{"name": "AI Food", "calories": 200, "macros": {"protein": 10, "carbs": 5, "fat": 2}}]
             result = adapter.record_nutrition("2026-01-01", "lunch", items)
             assert result["status"] == "ok"
+
+
+class TestFoodCacheReuse:
+    """一条食物只存「1 份基准值」，份量走日记 servings 倍数。"""
+
+    def _ok_resp(self, fid: str, version: int = 1) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {"items": [{"id": fid, "version": version}]}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_second_identical_food_reuses_id(self, adapter):
+        adapter.session.post.return_value = self._ok_resp("food-1")
+        item = {"name": "Oats", "calories": 75.8, "macros": {"protein": 2.7, "carbs": 13.5, "fat": 1.4}}
+
+        first = adapter._create_custom_food(item)
+        second = adapter._create_custom_food(item)
+
+        assert first["id"] == second["id"] == "food-1"
+        assert first["cached"] is False
+        assert second["cached"] is True
+        assert adapter.session.post.call_count == 1
+
+    def test_same_name_different_portion_reuses_food(self, adapter):
+        """同名不同份量不再新建食物——份量交给 servings。"""
+        adapter.session.post.return_value = self._ok_resp("food-1")
+        adapter._create_custom_food({"name": "Apple", "calories": 95})
+
+        result = adapter._create_custom_food({"name": "apple", "calories": 190})
+
+        assert result["id"] == "food-1"
+        assert result["cached"] is True
+        assert adapter.session.post.call_count == 1
+
+    def test_different_names_create_separate_foods(self, adapter):
+        adapter.session.post.side_effect = [self._ok_resp("food-1"), self._ok_resp("food-2")]
+
+        adapter._create_custom_food({"name": "Oats", "calories": 75.8})
+        result = adapter._create_custom_food({"name": "Rolled Oats", "calories": 75.8})
+
+        assert result["id"] == "food-2"
+        assert adapter.session.post.call_count == 2
+
+    def test_cache_persisted_to_disk(self, adapter, tmp_path):
+        adapter.session.post.return_value = self._ok_resp("food-9")
+        adapter._create_custom_food({"name": "Apple", "calories": 95})
+
+        saved = json.loads((tmp_path / "food_cache.json").read_text(encoding="utf-8"))
+        assert len(saved["entries"]) == 1
+        entry = next(iter(saved["entries"].values()))
+        assert entry["id"] == "food-9"
+        assert entry["calories"] == 95
+
+    def test_force_new_bypasses_cache(self, adapter):
+        adapter.session.post.side_effect = [self._ok_resp("food-1"), self._ok_resp("food-2")]
+        item = {"name": "Oats", "calories": 75.8}
+
+        adapter._create_custom_food(item)
+        result = adapter._create_custom_food(item, force_new=True)
+
+        assert result["id"] == "food-2"
+        assert result["cached"] is False
+        assert adapter.session.post.call_count == 2
+
+
+class TestServingMultiplier:
+    """份量倍数：本次热量 / 食物基准热量。"""
+
+    def test_servings_scale_by_calories(self, adapter):
+        ref = {"id": "f1", "version": 1, "cached": True, "base_calories": 95}
+        assert adapter._servings_for({"calories": 190}, ref) == 2.0
+        assert adapter._servings_for({"calories": 47.5}, ref) == 0.5
+
+    def test_zero_base_falls_back_to_one_serving(self, adapter):
+        ref = {"id": "f1", "version": 1, "cached": True, "base_calories": 0}
+        assert adapter._servings_for({"calories": 0}, ref) == 1.0
+
+    def test_write_food_entry_posts_scaled_servings(self, adapter):
+        adapter._create_custom_food = MagicMock(
+            return_value={"id": "f1", "version": 1, "cached": True, "base_calories": 95}
+        )
+        adapter._post_diary_entry = MagicMock()
+
+        adapter._write_food_entry("2026-01-01", "Snacks", {"name": "Apple", "calories": 190})
+
+        entry = adapter._post_diary_entry.call_args[0][0]
+        assert entry["servings"] == 2.0
+        assert entry["food"] == {"id": "f1", "version": 1}
+
+
+class TestSanityGate:
+    """USDA top-1 误匹配的拦截：数值离谱时退回 AI 估算，或至少显式告警。"""
+
+    ABSURD = {
+        "name": "Chicken drumstick, weird entry",
+        "calories_per_100g": 440.0,
+        "macros_per_100g": {"protein": 10.0, "carbs": 1.0, "fat": 44.0},
+    }
+
+    def test_usda_overestimate_falls_back_to_ai(self, adapter):
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [self.ABSURD]
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "dinner",
+            [{"name": "小鸡腿 1个", "calories": 110, "macros": {"protein": 10, "carbs": 3, "fat": 6.5}}],
+        )
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 110
+        assert result["status"] == "ok"
+        assert "warnings" not in result
+
+    def test_suspect_value_written_with_warning_when_no_ai(self, adapter):
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [self.ABSURD]
+
+        result = adapter.record_nutrition("2026-01-01", "dinner", [{"name": "小鸡腿 1个"}])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 440
+        assert any("自相矛盾" in w for w in result.get("warnings", []))
+
+    def test_macro_inconsistent_value_rejected(self, adapter):
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [{
+            "name": "Broken entry",
+            "calories_per_100g": 300.0,
+            "macros_per_100g": {"protein": 1.0, "carbs": 1.0, "fat": 1.0},
+        }]
+
+        result = adapter.record_nutrition("2026-01-01", "lunch", [{"name": "Mystery food"}])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 300
+        assert any("自相矛盾" in w for w in result.get("warnings", []))
+
+    def test_normal_usda_value_passes_through(self, adapter):
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [{
+            "name": "Chicken breast, raw",
+            "calories_per_100g": 165.0,
+            "macros_per_100g": {"protein": 31.0, "carbs": 0.0, "fat": 3.6},
+        }]
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "lunch", [{"name": "100g Chicken breast", "calories": 150}],
+        )
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 165.0
+        assert "warnings" not in result
+
+    def test_config_match_bypasses_gate(self, adapter_with_config):
+        mock_create_food(adapter_with_config)
+        mock_post_diary(adapter_with_config)
+        adapter_with_config.usda.search.return_value = [self.ABSURD]
+
+        result = adapter_with_config.record_nutrition(
+            "2026-01-01", "snack", [{"name": "蛋白粉", "calories": 120}],
+        )
+
+        written = adapter_with_config._create_custom_food.call_args[0][0]
+        assert written["calories"] == 120
+        assert "warnings" not in result
+
+    def test_explicit_weight_keeps_usda_value(self, adapter):
+        """给了克重时，USDA 的 per-100g 换算比 AI 估算可靠，倍数闸门必须让路。
+
+        实测踩过：``100g 鸡胸肉`` USDA 165 kcal、AI 估 90，比值 1.8 触发降级，
+        把正确值改成了 90。规格换算的权威性高于 AI 心算。
+        """
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [{
+            "name": "Chicken breast roasted",
+            "calories_per_100g": 165.0,
+            "macros_per_100g": {"protein": 31.0, "carbs": 0.0, "fat": 3.6},
+        }]
+
+        result = adapter.record_nutrition(
+            "2026-01-01", "lunch",
+            [{"name": "100g Chicken breast", "calories": 90,
+              "macros": {"protein": 15, "carbs": 0, "fat": 2}}],
+        )
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 165.0
+        assert "warnings" not in result
+
+    def test_explicit_weight_in_display_qty_also_skips_ratio_gate(self, adapter):
+        """字符串输入把规格剥进 display_qty，同样不能让 AI 覆盖 USDA。"""
+        mock_create_food(adapter)
+        mock_post_diary(adapter)
+        adapter.usda.search.return_value = [{
+            "name": "Peanuts, raw",
+            "calories_per_100g": 567.0,
+            "macros_per_100g": {"protein": 25.8, "carbs": 16.1, "fat": 49.2},
+        }]
+
+        adapter.record_nutrition("2026-01-01", "snack", ["100g Peanuts (300 kcal)"])
+
+        written = adapter._create_custom_food.call_args[0][0]
+        assert written["calories"] == 567.0
+
+    def test_has_explicit_size_reads_both_places(self, adapter):
+        """规格可能落在 name（dict 输入）或 display_qty（字符串输入）里。"""
+        assert adapter._has_explicit_size({"name": "100g 花生"}) is True
+        assert adapter._has_explicit_size({"name": "花生", "display_qty": "100g"}) is True
+        assert adapter._has_explicit_size({"name": "Milk 250ml"}) is True
+        assert adapter._has_explicit_size({"name": "小鸡腿 1个"}) is False
+        assert adapter._has_explicit_size({"name": "Apple", "display_qty": "1份"}) is False
+
+
+class TestFoodCacheZeroCalorieMismatch:
+    """0 kcal 无法用 servings 倍数表达（0 × n 恒为 0），缓存必须按「零卡性」隔离。"""
+
+    def _ok_resp(self, fid: str, version: int = 1) -> MagicMock:
+        resp = MagicMock()
+        resp.json.return_value = {"items": [{"id": fid, "version": version}]}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_zero_base_cache_does_not_poison_later_calories(self, adapter):
+        """第一次被兜底记成 0，同名食物之后不能永远写 0。"""
+        adapter.session.post.side_effect = [self._ok_resp("food-0"), self._ok_resp("food-10")]
+
+        first = adapter._create_custom_food({"name": "鱼油", "calories": 0})
+        second = adapter._create_custom_food({"name": "鱼油", "calories": 10})
+
+        assert first["base_calories"] == 0
+        assert second["id"] == "food-10"
+        assert second["cached"] is False
+        assert adapter._servings_for({"calories": 10}, second) == 1.0
+
+    def test_nonzero_base_not_reused_for_zero_item(self, adapter):
+        """反过来：缓存是 95 kcal、本次是 0，复用会把 95 写进去。"""
+        adapter.session.post.side_effect = [self._ok_resp("food-95"), self._ok_resp("food-0")]
+
+        adapter._create_custom_food({"name": "Apple", "calories": 95})
+        second = adapter._create_custom_food({"name": "Apple", "calories": 0})
+
+        assert second["id"] == "food-0"
+        assert second["cached"] is False
+
+    def test_both_zero_still_reuses(self, adapter):
+        """0 kcal 补剂本身是稳定的，照常复用，避免食物库膨胀。"""
+        adapter.session.post.return_value = self._ok_resp("food-coq10")
+
+        adapter._create_custom_food({"name": "CoQ10", "calories": 0})
+        second = adapter._create_custom_food({"name": "CoQ10", "calories": 0})
+
+        assert second["cached"] is True
+        assert adapter.session.post.call_count == 1

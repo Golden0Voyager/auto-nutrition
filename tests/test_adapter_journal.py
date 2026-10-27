@@ -100,6 +100,28 @@ class TestLogToLocalJournal:
         assert journal[0]["items"][0]["name"] == "Food 2"
         assert journal[1]["items"][0]["name"] == "Food 3"
 
+    def test_overflow_is_archived_not_dropped(self, adapter):
+        """超出窗口的旧记录必须转存归档，不能在截断时静默消失。"""
+        adapter._JOURNAL_MAX_ENTRIES = 2
+
+        for i in range(4):
+            adapter._log_to_local_journal(f"2026-01-0{i+1}", "Lunch", [{"name": f"Food {i}", "calories": 100}])
+
+        archive_file = os.path.join(os.path.dirname(adapter.JOURNAL_FILE), "nutrition_journal_archive.json")
+        assert os.path.exists(archive_file)
+        with open(archive_file, encoding="utf-8") as f:
+            archive = json.load(f)
+
+        archived_names = [e["items"][0]["name"] for e in archive]
+        assert archived_names == ["Food 0", "Food 1"]
+
+        # 归档 + 窗口 = 原始 4 条，一条不少
+        with open(adapter.JOURNAL_FILE, encoding="utf-8") as f:
+            journal = json.load(f)
+        assert [e["items"][0]["name"] for e in journal] + archived_names == [
+            "Food 2", "Food 3", "Food 0", "Food 1",
+        ]
+
     def test_atomic_write_no_corruption(self, adapter):
         items = [{"name": "Apple", "calories": 95}]
         adapter._log_to_local_journal("2026-01-01", "Snack", items)
