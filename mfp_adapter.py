@@ -648,8 +648,13 @@ class MFPAdapter:
             data = resp.json()
             self.access_token = data["access_token"]
             self.user_id = data.get("user_id") # 获取当前用户 ID
-            expires_in = data.get("expires_in", 3600)  # MFP 默认 Token 有效期通常为 1 小时
-            self.token_expires_at = time.time() + expires_in
+            expires_in = float(data.get("expires_in", 3600))  # MFP 默认 Token 有效期通常为 1 小时
+            now = time.time()
+            self.token_expires_at = now + expires_in
+            # 提前寿命的 10% 刷新，最多提前 5 分钟；不能把整个 3600 秒寿命
+            # 都当成提前量，否则一小时 Token 刚签发就会被判定为需要刷新。
+            refresh_skew = min(300.0, expires_in * 0.1)
+            self._token_refresh_at = now + max(0.0, expires_in - refresh_skew)
             self.session.headers.update({
                 "Authorization": f"Bearer {self.access_token}",
                 "mfp-client-id": "mfp-main-js",
@@ -668,7 +673,9 @@ class MFPAdapter:
                 self.access_token = None
 
     def _ensure_token_valid(self) -> None:
-        if time.time() > (self.token_expires_at - 3600):
+        # 兼容测试和反序列化状态只设置 token_expires_at 的旧调用方。
+        refresh_at = getattr(self, "_token_refresh_at", self.token_expires_at - 300)
+        if time.time() >= refresh_at:
             self._fetch_access_token()
         if not self.access_token:
             raise SessionExpiredError("MFP 会话已过期或未登录，请调用 `get_cookie_guide` 获取教程，再用 `import_cookies` 导入凭据。")
@@ -1367,9 +1374,11 @@ class MFPAdapter:
         non_english_misses: list[str] = []
         # 通过合理性闸门失败、但仍被写入的条目（营养数据自相矛盾）
         suspect_items: list[str] = []
-        # 同餐次重名提示：复用已取到的基线，零额外请求
+        # 同餐次重名提示：历史基线零额外请求；本批内部另用最终解析名去重。
         same_meal_before: set[str] = set()
         same_meal_duplicates: list[str] = []
+        batch_names: set[str] = set()
+        batch_duplicates: list[str] = []
         # 写入前基线：仅用于 5xx/超时后判断「是否已落库」，避免重试造成双计
         diary_snapshot = self._diary_entries_snapshot(date_str)
         if diary_snapshot:
@@ -1507,9 +1516,15 @@ class MFPAdapter:
             if "macros" not in item:
                 item["macros"] = {}
 
-            # 同餐次已有同名条目 → 只提示，不拦（同一餐吃两份是合法需求）
-            if same_meal_before and _normalize_entry_name(item["name"]).casefold() in same_meal_before:
+            # 历史同餐次和本批内部重名都只提示、不拦（两份可能是真实需求）。
+            # 必须在配置/别名解析后取名字，「苹果」与「Apple」才能识别为同一项。
+            normalized_name = _normalize_entry_name(item["name"]).casefold()
+            if same_meal_before and normalized_name in same_meal_before:
                 same_meal_duplicates.append(item["name"])
+            if normalized_name in batch_names:
+                batch_duplicates.append(item["name"])
+            else:
+                batch_names.add(normalized_name)
 
             processed_items.append(item)
 
@@ -1556,6 +1571,11 @@ class MFPAdapter:
             warnings.append(
                 f'ℹ️ {label}今天已有同名条目，本次仍写入：{", ".join(same_meal_duplicates)}。'
                 f'若是重复执行，请用 delete_entry 删掉多出来的那条。'
+            )
+        if batch_duplicates:
+            warnings.append(
+                f'⚠️ 本次录入中有重复条目，仍全部写入：{", ".join(batch_duplicates)}。'
+                f'若不是有意吃多份，请用 delete_entry 删掉多出来的条目。'
             )
         for conflict in config_conflicts:
             warnings.append(
@@ -2035,6 +2055,7 @@ class MFPAdapter:
 
         归档失败时返回 False，调用方保留原日志（宁可文件大，不可丢数据）。
         归档路径跟随 JOURNAL_FILE 所在目录，测试改 JOURNAL_FILE 时自动隔离。
+        条目内容指纹提供幂等性：归档成功但 journal 写失败后，重试不会重复追加。
         """
         if not entries:
             return True
@@ -2057,14 +2078,25 @@ class MFPAdapter:
                     logger.error("读取日志归档失败（本次不归档，保留原日志）: {}", exc)
                     return False
 
-            archive.extend(entries)
+            # 归档成功但 journal 写失败后重试会重复送同一批 entries，
+            # 按内容指纹幂等，避免同一批旧记录被反复追加。
+            def fingerprint(entry: dict[str, Any]) -> str:
+                return json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+            archived = {fingerprint(entry) for entry in archive}
+            new_entries = [entry for entry in entries if fingerprint(entry) not in archived]
+            if not new_entries:
+                logger.info("日志归档: {} 条均已存在，跳过重复写入", len(entries))
+                return True
+
+            archive.extend(new_entries)
             temp_name = ""
             try:
                 with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(archive_file) or ".", encoding="utf-8") as tf:
                     json.dump(archive, tf, indent=2, ensure_ascii=False)
                     temp_name = tf.name
                 os.replace(temp_name, archive_file)
-                logger.info("日志归档: {} 条转存 {}（累计 {} 条）", len(entries), os.path.basename(archive_file), len(archive))
+                logger.info("日志归档: {} 条转存 {}（累计 {} 条）", len(new_entries), os.path.basename(archive_file), len(archive))
                 return True
             except Exception as exc:
                 logger.error("写日志归档失败（本次不归档，保留原日志）: {}", exc)
@@ -2417,7 +2449,8 @@ def _meal_time_warnings(date_str: str, meal_type: str) -> list[str]:
     now = datetime.now()
     today_str = now.strftime("%Y-%m-%d")
     warnings: list[str] = _date_warnings(date_str)
-    if date_str != today_str:
+    # 长期补录、未来日期和格式错误已有更具体的提示，不再重复报日期不同。
+    if date_str != today_str and not warnings:
         warnings.append(f"⚠️ 注意：当前日期为 {today_str}，但正在录入 {date_str} 的数据。")
 
     hour = now.hour

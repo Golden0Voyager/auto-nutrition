@@ -522,6 +522,21 @@ class TestSameMealDuplicateHint:
         assert any("今天已有同名条目" in w for w in result["warnings"])
         assert result["count"] == 1  # 仍然写入，只是提示
 
+    @pytest.mark.parametrize(
+        "items",
+        [
+            [{"name": "Apple"}, {"name": "Apple"}],
+            [{"name": "苹果"}, {"name": "Apple"}],
+        ],
+    )
+    def test_hints_for_duplicates_inside_the_same_batch(self, adapter_with_config, items):
+        adapter = self._with_snapshot(adapter_with_config, [])
+
+        result = adapter.record_nutrition("2026-01-01", "breakfast", items)
+
+        assert result["count"] == 2  # 两份可能是真实需求，只提示，不拦截
+        assert any("本次录入" in w and "重复" in w for w in result["warnings"])
+
     def test_no_hint_when_item_is_in_another_meal(self, adapter_with_config):
         adapter = self._with_snapshot(
             adapter_with_config,

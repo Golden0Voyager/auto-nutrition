@@ -42,6 +42,68 @@ def test_daily_supplement_alias_resolves(real_adapter, query, marker, calories, 
         assert item["macros"][key] == expected, f"「{query}」的 {key} 剂量不符"
 
 
+@pytest.mark.parametrize(
+    "query, calories",
+    [
+        ("Oats (燕麦片 15g)", 58.0),
+        ("Bread (法棍/吐司 50g/约2片)", 145.0),
+    ],
+)
+def test_breakfast_combo_items_have_config_anchors(real_adapter, query, calories):
+    """删掉组合声明值时，单项配置仍能给出相同的份量与热量。"""
+    item = real_adapter._apply_config_safeguard({"name": query})
+
+    assert item.get("_config_matched") is True
+    assert item["calories"] == calories
+
+
+class TestConfigMacroConsistency:
+    """配置条目的标称热量必须与自己的宏量自洽。
+
+    真实事故（2026-10-27 全量核出）：``Oats (燕麦片 15g)`` 标称 37 kcal，而
+    P2.6 / C9.9 / F1.1 推算 59.9 kcal，差 38%；USDA「Quaker Quick Oats, dry」
+    371/100g 折算 15g 也有 56 kcal。因为配置命中**不打 Level 4 告警**，这个
+    错误完全静默，每天少记约 21 kcal —— 少报比多报更危险，人不会自己发现。
+
+    判据是「相对偏差 > 25% **且** 绝对差 > 15 kcal」，两个条件都要满足：
+    只卡相对偏差会误伤低热量叶菜——菠菜标称 23 kcal、宏量推算 29.6 kcal，
+    相对差 29% 超过阈值，但绝对差只有 6.6 kcal，没有实际影响。
+    高纤维食物也有同样的问题（纤维算进 carbs 但只产 ~2 kcal/g）。
+    """
+
+    REL_TOLERANCE = 0.25
+    ABS_FLOOR_KCAL = 15.0
+
+    def test_calories_match_macros(self, real_adapter):
+        config = real_adapter._load_config()
+
+        offenders = []
+        checked = 0
+        for section in ("supplements", "regional_foods", "common_foods"):
+            for conf in (config.get(section) or {}).values():
+                calories = conf.get("calories")
+                macros = conf.get("macros") or {}
+                if calories is None or not macros:
+                    continue
+                macro_kcal = (
+                    float(macros.get("protein") or 0) * 4
+                    + float(macros.get("carbs") or 0) * 4
+                    + float(macros.get("fat") or 0) * 9
+                )
+                if macro_kcal <= 0:
+                    continue
+                checked += 1
+                delta = abs(float(calories) - macro_kcal)
+                if delta > self.ABS_FLOOR_KCAL and delta / macro_kcal > self.REL_TOLERANCE:
+                    offenders.append(
+                        f'{conf.get("name")}: 标称 {calories:g} kcal，'
+                        f"宏量推算 {macro_kcal:.1f} kcal（差 {delta / macro_kcal:.0%}）"
+                    )
+
+        assert checked >= 20, f"只核到 {checked} 条，配置结构可能变了，检查是否漏扫"
+        assert not offenders, "配置热量与宏量自相矛盾：\n  " + "\n  ".join(offenders)
+
+
 class TestEnglishAliasScope:
     """英文别名必须开头锚定；规格不同要按比例折算，不能直接套用配置值。
 
