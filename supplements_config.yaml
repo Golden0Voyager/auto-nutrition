@@ -3,7 +3,7 @@
 # 加条目时务必带 aliases，否则口语简称命中不了、会落到 USDA 按 100g 口径乱算。
 
 metadata:
-  version: "1.2"
+  version: "1.3"
   description: "与 MFP (MyFitnessPal) API 对齐的营养素单位规范"
   unit_reference:
     macros:
@@ -272,7 +272,10 @@ common_foods:
 
   oats_15g:
     name: "Oats (燕麦片 15g)"
-    calories: 37
+    # 58 而不是 37：宏量（P2.6 / C9.9 / F1.1）本身就等于 ~60 kcal，
+    # 37 与自己的宏量差 38%，且 USDA「Quaker Quick Oats, dry」371/100g
+    # 折算 15g = 56 kcal。原值每天少算约 21 kcal。
+    calories: 58
     macros: { protein: 2.6, carbs: 9.9, fat: 1.1 }
     micros: { fiber: 2.3, iron: 4.5, potassium: 85, sodium: 0.6, calcium: 0.7 }
     aliases: ["Oats", "燕麦片"]
@@ -405,7 +408,7 @@ meal_combos:
         macros: { protein: 9.6, carbs: 14.4, fat: 10.2 }
         micros: { calcium: 30, potassium: 450, sodium: 120, vitamin_d: 15, sugar: 15.0 }
       - name: "Oats (燕麦片 15g)"
-        calories: 37
+        calories: 58
         macros: { protein: 2.6, carbs: 9.9, fat: 1.1 }
         micros: { fiber: 2.3, iron: 4.5, potassium: 85, sodium: 0.6, calcium: 0.7 }
       - name: "Fried Egg (煎鸡蛋 Sunny Up)"
