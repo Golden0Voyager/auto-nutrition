@@ -2536,6 +2536,62 @@ def _resolve_segments(segments: list[str] | None) -> tuple[set[str] | None, str 
     return keys or None, None
 
 
+# 隔天服用的锚点日：该日吃，之后每 2 天吃一次。
+# 与历史定时任务（rrule validFrom=2026-10-29）保持连续；改这个值等于平移
+# 整个节奏，所以不要为了「今天想吃」去动它，改用 force 单独补录。
+EVERY_OTHER_DAY_ANCHOR = "2026-10-29"
+
+
+def is_every_other_day(date_str: str, anchor: str = EVERY_OTHER_DAY_ANCHOR) -> bool:
+    """``date_str`` 是否落在隔天服用的「服用日」上（锚点当天算服用日）。
+
+    用**日期差奇偶**判断，而不是「上次跑到哪」的计数器：定时任务漏跑一天、
+    手动补录、时区切换都不会让节奏错位。早于锚点同样成立——Python 的 ``%``
+    对负数返回非负余数（``-1 % 2 == 1``），所以锚点前一天是「非服用日」。
+    """
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d").date()
+        base = datetime.strptime(anchor, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"日期格式应为 YYYY-MM-DD：{date_str!r} / {anchor!r}") from exc
+    return (day - base).days % 2 == 0
+
+
+def split_every_other_day(
+    segments: list[str] | None,
+    every_other_day: list[str] | None,
+    date_str: str,
+    anchor: str = EVERY_OTHER_DAY_ANCHOR,
+) -> tuple[list[str] | None, list[str], str | None]:
+    """从 ``segments`` 里剔除「今天不该吃」的隔天段。
+
+    返回 ``(保留的段, 被剔除的段, 错误信息)``。``segments`` 为 None（写全部）
+    时无法安全剔除，直接报错——定时任务里宁可失败，也不能悄悄少写或多写。
+
+    ``segments`` 与 ``every_other_day`` 都走 ``_resolve_segments``，所以
+    ``d3`` / ``d3k2`` / ``d3_k2_stack`` 三种写法等价。
+    """
+    keys, error = _resolve_segments(segments)
+    if error:
+        return None, [], error
+    eod_keys, eod_error = _resolve_segments(every_other_day)
+    if eod_error:
+        return None, [], eod_error
+    if not eod_keys:
+        return (sorted(keys) if keys else None), [], None
+
+    try:
+        dose_day = is_every_other_day(date_str, anchor)
+    except ValueError as exc:
+        return None, [], str(exc)
+    if dose_day:
+        return (sorted(keys) if keys else None), [], None
+    if keys is None:
+        return None, [], "按隔天剔除必须显式指定段，不能对「写全部」使用隔天规则"
+
+    return sorted(keys - eod_keys), sorted(keys & eod_keys), None
+
+
 def _single_dose_names(routines: dict[str, Any], resolve: Callable[[str], str]) -> set[str]:
     """在全部 routine 段里只出现一次的条目名（用解析后的最终名比对）。
 
