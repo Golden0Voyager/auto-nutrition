@@ -15,7 +15,14 @@
     record_supplements.py morning --date 2026-10-26
     record_supplements.py workout --skip D3       # 训练包，跳过 D3+K2
 
-段名: morning / dinner / night / workout（也接受完整 key morning_stack 等）。
+一条命令记完全天（合并定时任务用）::
+
+    record_supplements.py morning dinner night d3 --every-other-day d3
+
+``--every-other-day`` 让指定段按日期奇偶决定今天写不写，所以「每天跑一次」
+也能表达隔天节奏；非服用日只跳过该段，其余照常写入。
+
+段名: morning / dinner / night / workout / d3（也接受完整 key morning_stack 等）。
 
 退出码: 0 = 成功（含「今天已记过，跳过」），1 = 失败，2 = 参数错误。
 """
@@ -41,11 +48,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "segments",
         nargs="+",
-        help="morning / dinner / night / workout，或完整 key（morning_stack 等）",
+        help="morning / dinner / night / workout / d3，或完整 key（morning_stack 等）",
     )
     parser.add_argument("--date", default=None, help="YYYY-MM-DD，默认今天")
     parser.add_argument("--dry-run", action="store_true", help="只预览不写入")
     parser.add_argument("--force", action="store_true", help="忽略「今天已记」检查")
+    parser.add_argument(
+        "--every-other-day",
+        dest="every_other_day",
+        action="append",
+        default=None,
+        metavar="段",
+        help="该段隔天服用（如 d3）；非服用日自动从本次写入中剔除",
+    )
+    parser.add_argument(
+        "--anchor",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=f"隔天节奏的锚点日，默认 {mfp_adapter.EVERY_OTHER_DAY_ANCHOR}",
+    )
     parser.add_argument(
         "--skip",
         action="append",
@@ -56,12 +77,30 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     date_str = args.date or datetime.date.today().isoformat()
+
+    segments, dropped, error = mfp_adapter.split_every_other_day(
+        args.segments,
+        args.every_other_day,
+        date_str,
+        args.anchor or mfp_adapter.EVERY_OTHER_DAY_ANCHOR,
+    )
+    if error:
+        print(f"错误: {error}")
+        return 2
+    if dropped:
+        print(f"（{date_str} 不是隔天服用日，本次跳过：{'、'.join(dropped)}）")
+    # 空列表必须在这里截住：record_daily_supplements 把空 segments 当成
+    # 「不限段」，会反过来写全部补剂。
+    if segments is not None and not segments:
+        print(f"{date_str} 没有需要写入的补剂段，跳过。")
+        return 0
+
     output = mfp_adapter.record_daily_supplements(
         date_str,
         skip=args.skip,
         dry_run=args.dry_run,
         force=args.force,
-        segments=args.segments,
+        segments=segments,
     )
     print(output)
 

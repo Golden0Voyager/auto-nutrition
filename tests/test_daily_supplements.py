@@ -364,6 +364,108 @@ class TestResolveSegments:
         assert "morning" in error
 
 
+class TestEveryOtherDay:
+    """隔天节奏按日期奇偶算，不靠「上次跑到哪」的计数器。
+
+    合并定时任务后只有一个每天跑的任务，隔天必须由脚本自己判断——
+    否则要么天天吃 D3，要么彻底不写。
+    """
+
+    ANCHOR = "2026-10-29"
+
+    @pytest.mark.parametrize(
+        ("date_str", "expected"),
+        [
+            ("2026-10-29", True),   # 锚点当天
+            ("2026-10-30", False),
+            ("2026-10-31", True),
+            ("2026-11-02", True),
+            ("2026-11-03", False),
+            ("2026-11-04", True),
+            ("2026-10-27", True),   # 锚点前两天（负数取余仍成立）
+            ("2026-10-28", False),  # 锚点前一天
+        ],
+    )
+    def test_parity(self, date_str, expected):
+        assert mfp_adapter.is_every_other_day(date_str, self.ANCHOR) is expected
+
+    def test_default_anchor_matches_the_shipped_schedule(self):
+        # 锚点变了等于平移整个节奏，这条断言就是防止手滑改掉。
+        assert mfp_adapter.EVERY_OTHER_DAY_ANCHOR == "2026-10-29"
+
+    @pytest.mark.parametrize(("date_str", "anchor"), [("2026/10/29", "2026-10-29"), ("2026-10-29", "2026-13-01")])
+    def test_bad_date_format_raises(self, date_str, anchor):
+        with pytest.raises(ValueError, match="YYYY-MM-DD"):
+            mfp_adapter.is_every_other_day(date_str, anchor)
+
+
+class TestSplitEveryOtherDay:
+    """把「今天不该吃」的隔天段从本次写入里剔除。"""
+
+    def test_dose_day_keeps_everything(self):
+        kept, dropped, error = mfp_adapter.split_every_other_day(
+            ["morning", "dinner", "night", "d3"], ["d3"], "2026-11-02"
+        )
+
+        assert error is None
+        assert kept == ["d3_k2_stack", "dinner_stack", "morning_stack", "night_stack"]
+        assert dropped == []
+
+    def test_non_dose_day_drops_only_the_extra_segment(self):
+        kept, dropped, error = mfp_adapter.split_every_other_day(
+            ["morning", "dinner", "night", "d3"], ["d3"], "2026-11-03"
+        )
+
+        assert error is None
+        assert dropped == ["d3_k2_stack"]
+        assert "d3_k2_stack" not in kept
+        assert kept == ["dinner_stack", "morning_stack", "night_stack"]
+
+    def test_all_dropped_returns_empty_list_not_none(self):
+        """空列表必须和 None（写全部）区分开，否则会反过来写全天补剂。"""
+        kept, dropped, error = mfp_adapter.split_every_other_day(["d3"], ["d3"], "2026-11-03")
+
+        assert error is None
+        assert kept == []
+        assert dropped == ["d3_k2_stack"]
+
+    def test_alias_forms_are_equivalent(self):
+        for alias in ("d3", "d3k2", "d3_k2_stack"):
+            kept, _, error = mfp_adapter.split_every_other_day(["morning", alias], [alias], "2026-11-03")
+            assert error is None
+            assert kept == ["morning_stack"]
+
+    def test_without_every_other_day_nothing_changes(self):
+        kept, dropped, error = mfp_adapter.split_every_other_day(["morning", "d3"], None, "2026-11-03")
+
+        assert error is None
+        assert dropped == []
+        assert kept == ["d3_k2_stack", "morning_stack"]
+
+    def test_none_segments_passes_through_when_no_parity_rule(self):
+        assert mfp_adapter.split_every_other_day(None, None, "2026-11-03") == (None, [], None)
+
+    def test_write_all_with_parity_rule_is_an_error(self):
+        """「写全部」无法安全剔除，宁可失败也不猜。"""
+        kept, _, error = mfp_adapter.split_every_other_day(None, ["d3"], "2026-11-03")
+
+        assert kept is None
+        assert error is not None
+        assert "显式指定段" in error
+
+    def test_unknown_every_other_day_segment_is_an_error(self):
+        _, _, error = mfp_adapter.split_every_other_day(["morning"], ["d33"], "2026-11-03")
+
+        assert error is not None
+        assert "d33" in error
+
+    def test_bad_anchor_is_an_error_not_a_crash(self):
+        _, _, error = mfp_adapter.split_every_other_day(["morning", "d3"], ["d3"], "2026-11-03", anchor="oops")
+
+        assert error is not None
+        assert "YYYY-MM-DD" in error
+
+
 class TestExtraSegments:
     """EXTRA 段（隔天补剂，如 D3+K2）只能显式点名，绝不进全天组合。
 
