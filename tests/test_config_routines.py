@@ -49,6 +49,20 @@ def test_d3_k2_lives_in_its_own_every_other_day_segment():
     assert "d3_k2_stack" in extra_keys
 
 
+def test_vitamin_c_lives_in_morning_stack_only_once():
+    """汤臣倍健维C片 2026-11-08 入档：常规日只在早餐后 1 片。
+
+    晚餐那片是「大跑量/关节高负荷日选加」，不能进固定栈——晨补和晚餐补剂
+    每天都由定时任务写入，放进去会让休息日凭空多出 120mg 维C。
+    """
+    routines = _routines()
+    morning_names = [item["name"] for item in routines["morning_stack"]["items"]]
+    all_names = [item["name"] for conf in routines.values() for item in conf["items"]]
+
+    assert "维生素C" in morning_names
+    assert all_names.count("维生素C") == 1
+
+
 def test_workout_stack_contains_pre_and_post_items():
     names = [item["name"] for item in _routines()["workout_stack"]["items"]]
 
