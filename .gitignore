@@ -52,3 +52,10 @@ htmlcov/
 
 # git worktrees（AGENTS.md 规定按分支隔离开发）
 .worktrees/
+
+# macOS 目录元数据，不入库
+.DS_Store
+
+# 私人网络工具教程（含推广链接），只留本地
+docs/airport_tutorial.md
+docs/airport_tutorial.pdf
