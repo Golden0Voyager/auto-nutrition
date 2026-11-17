@@ -3,7 +3,7 @@
 # 加条目时务必带 aliases，否则口语简称命中不了、会落到 USDA 按 100g 口径乱算。
 
 metadata:
-  version: "1.3"
+  version: "1.4"
   description: "与 MFP (MyFitnessPal) API 对齐的营养素单位规范"
   unit_reference:
     macros:
@@ -177,6 +177,20 @@ supplements:
       vitamin_b5: 7.2
     aliases: ["维生素B", "VB", "B族", "B族维生素", "康纽莱 B族", "康纽莱 维生素B"]
     # 服用建议：每日 1 片，早餐后
+  vitamin_c_1tab:
+    name: "Vitamin C [M] (汤臣倍健 维生素C片 1片 - 120mg)"
+    calories: 0
+    macros: { carbs: 0, protein: 0, fat: 0 }
+    micros:
+      vitamin_c: 133.3 # 120mg / 90mg DV（MFP 用 %DV；标签写 120% RNI 是按 100mg 基准）
+    aliases: ["维生素C", "维C", "VC", "维他命C", "汤臣倍健维C", "汤臣倍健 维生素C", "Vitamin C"]
+    # 2026-11-08 新增入档（补剂清单第 10 款，橙子味 650mg/片）。
+    # 双源缓冲：L-抗坏血酸 + L-抗坏血酸钠，每片维C 120mg。
+    # 片剂辅料含白砂糖/异麦芽酮糖醇，热量 <2 kcal，与其余片剂
+    # （B族 / Q10 / Move Free / D3+K2）口径一致按 0 kcal 记。
+    # 常规日早餐后温水吞服 1 片；大跑量日晚餐可加服 1 片（按需手工记，
+    # 不进固定栈，否则休息日会天天多记一遍）。严禁练后 2h 内与肌酸同服；
+    # 抽血复查前 3-5 天停用（抗坏血酸干扰尿常规试纸显色）。
 
 regional_foods:
   jianbing_guozi:
@@ -194,6 +208,34 @@ regional_foods:
     # 按市售常见份量取 420 kcal。
     # 必须走配置层：中文名喂 USDA 会被 CN_EN 词表拆成 "Egg + Lettuce" 搜到
     # 不相干结果（比如生菜卷），热量直接错。
+  jidan_guanbing:
+    name: "鸡蛋灌饼 Egg-stuffed Pancake (1份 约200g)"
+    calories: 480
+    macros: { carbs: 52, protein: 16, fat: 22 }
+    micros:
+      fiber: 2
+      sodium: 780
+      sugar: 3
+      calcium: 8
+      iron: 2
+    aliases: ["鸡蛋灌饼", "灌饼", "egg-stuffed pancake", "Egg-stuffed Pancake"]
+    # 估算：面粉饼皮 100g ≈ 350 + 鸡蛋 1个 ≈ 70 + 煎油 15g ≈ 135 ≈ 555，
+    # 按市售常见份量（饼皮略小、油略少）取 480 kcal。
+    # 必须走配置层：中文名喂 USDA 会被拆成 "Egg"，匹配到
+    # "Egg, whole, raw, fresh" 143 kcal，整份热量直接少算 70%。
+  # 武汉热干面：USDA 无此条目，按 "Hot Dry Noodles" 搜会命中
+  # "Sorghum, whole grain, dry, raw" 341 kcal/100g（高粱米），完全错。
+  # 口径：街头/店售一碗（熟碱水面约 250g + 芝麻酱 + 红油 + 萝卜丁）。
+  wuhan_reganmian:
+    name: "Wuhan Hot Dry Noodles (武汉热干面 一碗)"
+    calories: 540
+    macros: { protein: 16, carbs: 71, fat: 21 }
+    micros: { fiber: 3, sodium: 900, potassium: 260 }
+    aliases: ["热干面", "武汉热干面", "reganmian", "hot dry noodles"]
+    # 估算：熟碱水面 250g ≈ 330 + 芝麻酱 20g ≈ 125 + 红油/香油 8g ≈ 70
+    # + 萝卜丁/酸豆角/葱花 ≈ 15 ≈ 540。
+    # 面少（150g 小份）按 0.7 serving 记，加卤蛋另计。
+
   bayu_dumplings:
     name: "Mackerel Dumplings (胶东鲅鱼水饺 10只)"
     calories: 550
@@ -226,6 +268,73 @@ regional_foods:
       cholesterol: 92
       potassium: 350
     aliases: ["酱牛肉", "卤牛肉"]
+
+  # 牛杂火锅：名称里含「豆腐」「白菜」，CN_EN 词表会把整串改写成
+  # Tofu / Chinese cabbage，USDA 命中 "Cabbage, chinese, raw" 16 kcal，
+  # 整餐少算 97%。必须走配置层，按一份定稿。
+  # 口径：双人份大锅的「人均」摄入（整锅约 2000 kcal ÷ 2 人）。
+  niuza_huoguo:
+    name: "Beef Offal Hotpot (牛杂火锅 双人份大锅 人均1份 - 牛杂+粉丝+豆腐+白菜)"
+    calories: 1000
+    macros: { protein: 55, carbs: 60, fat: 58 }
+    micros: { fiber: 6, sodium: 3200, potassium: 1100 }
+    aliases: ["牛杂火锅", "牛杂锅", "牛杂煲"]
+    # 估算（整锅 → 人均）：
+    # 牛杂 500g 含油 ≈ 950 + 粉丝 100g 干 ≈ 350 + 豆腐 250g ≈ 200
+    # + 白菜 350g ≈ 50 + 麻辣牛油汤底吸油 ≈ 300 + 油碟 ≈ 150
+    # ≈ 2000 kcal 整锅，人均 1000。清汤/番茄锅底可下调约 150。
+
+  # 羊肉火锅（清汤涮锅）：名称含「羊肉」「豆腐」，CN_EN 词表会改写成 Lamb / Tofu，
+  # USDA AND 无结果后 OR fallback 命中 "Lamb, Australian, ground, raw" 255 kcal/100g，
+  # 整餐只算 255 kcal 且宏量全错；且该值 4/4/9 自洽，合理性闸门不会拦。必须走配置层。
+  # 口径：单人一餐清汤锅（无主食、无酒），明显低于牛杂火锅（麻辣牛油+粉丝，人均 1000）。
+  yangrou_huoguo:
+    name: "Lamb Hotpot (羊肉火锅 清汤涮锅 单人份 - 娃娃菜+冻豆腐+白萝卜+现切羊肉片)"
+    calories: 850
+    macros: { protein: 55, carbs: 20, fat: 62 }
+    micros: { fiber: 6, sodium: 1800, potassium: 900, cholesterol: 120, saturated_fat: 22 }
+    aliases: ["羊肉火锅", "涮羊肉火锅", "清汤羊肉锅", "羊肉涮锅"]
+    # 估算（4P+4C+9F = 858，与 850 自洽）：
+    # 现切羊肉片 200g ≈ 480 + 冻豆腐 150g（多孔吸汤）≈ 180
+    # + 娃娃菜 200g ≈ 30 + 白萝卜 200g ≈ 30 + 清汤浮油/蘸料 ≈ 130 ≈ 850。
+    # 双人份大锅人均可上调到 1000-1100；纯瘦肉片少油可下调到 700。
+
+  # 羊肉米线：名称含「羊肉」「米线」，USDA 只能按 "Lamb" 或 "Rice noodles" 取其一，
+  # 拿不到「羊肉+米线+浮油汤底」的整碗口径（漏掉辣油和骨汤油，低估 40%+）。
+  # 口径：街边/小店一大碗（约 750g 连汤，米线 200g + 羊肉片 100g）。
+  yangrou_mixian:
+    name: "Lamb Rice Noodles (羊肉米线 一大碗)"
+    calories: 780
+    macros: { protein: 30, carbs: 70, fat: 42 }
+    micros: { fiber: 4, sodium: 2200, potassium: 520, cholesterol: 85, saturated_fat: 15 }
+    aliases: ["羊肉米线", "羊肉粉", "羊杂米线", "lamb rice noodles"]
+    # 估算：鲜米线 200g ≈ 260 + 带脂羊肉片 100g ≈ 250 + 骨汤浮油/辣油 ≈ 220
+    # + 香菜酸菜等 ≈ 20 ≈ 750；按大碗略放宽取 780。小碗（米线 150g）约 600。
+
+  # 炸土豆：USDA 的 "Potatoes, raw" 77 kcal/100g 会低估 70%（不算吸油），
+  # "French fries" 312 kcal/100g 更接近，但街头狼牙土豆还带调料和更多油。
+  # 口径：街头一份约 180-200g。
+  zha_tudou:
+    name: "Fried Potatoes (炸土豆/狼牙土豆 一份)"
+    calories: 520
+    macros: { protein: 6, carbs: 62, fat: 27 }
+    micros: { fiber: 5, sodium: 650, potassium: 800, vitamin_c: 20 }
+    aliases: ["炸土豆", "狼牙土豆", "炸洋芋", "炸薯条", "fried potatoes", "fried potato"]
+    # 估算：生土豆 200g ≈ 154 + 吸油 18g ≈ 162 + 调料/辣椒油 ≈ 200 ≈ 516。
+    # 若是空气炸锅/少油版，按 0.6 serving（约 310）记。
+
+  # 鱼豆腐：CN_EN 词表会把「鱼豆腐」改写成「鱼 Tofu」，USDA 命中 "Tofu, fried"
+  # 270 kcal/100g（炸豆腐，不是鱼豆腐），蛋白质也全错。USDA 的 "Fish, surimi"
+  # 99 kcal/100g 又漏了鱼豆腐里的淀粉和植物油，低估约 40%。
+  # 口径：按 100g 标定，写入时带克重（如「50g 鱼豆腐」）即可按比例折算。
+  # 一块鱼豆腐约 15-17g，三块 ≈ 50g。
+  yu_doufu:
+    name: "Fish Tofu (鱼豆腐 100g)"
+    calories: 155
+    macros: { protein: 10, carbs: 12, fat: 6 }
+    micros: { sodium: 500, calcium: 40 }
+    aliases: ["鱼豆腐", "fish tofu", "fish bean curd"]
+    # 估算：鱼糜 60% + 淀粉 15% + 植物油/糖/盐 ≈ 155 kcal，P 10 / C 12 / F 6。
 
 common_foods:
   milk_full_cream_300ml:
@@ -348,6 +457,23 @@ common_foods:
     micros: { fiber: 2.0, sugar: 2.5, sodium: 150, potassium: 280, vitamin_c: 20, vitamin_a: 30 }
     aliases: ["纯蔬菜沙拉", "蔬菜沙拉", "轻食沙拉", "veggie salad", "vegetable salad"]
 
+  # 咖啡：热量几乎为 0，但咖啡因是用户关心的摄入量。USDA 的
+  # "Beverages, coffee, brewed" 按 100g 口径（1 kcal）没法区分 shot 与整杯，
+  # 且拿不到咖啡因。按「1 shot / 1 杯」标定，按份数写（2 杯浓缩 → ratio 2）。
+  espresso_shot:
+    name: "Espresso (浓缩咖啡 1 shot 30ml)"
+    calories: 3
+    macros: { protein: 0.1, carbs: 0.5, fat: 0.1 }
+    micros: { caffeine: 63, potassium: 34 }
+    aliases: ["浓缩咖啡", "意式浓缩", "双份浓缩", "espresso", "shot"]
+  americano:
+    name: "Americano (美式咖啡 一杯 240ml - 无糖无奶)"
+    calories: 5
+    macros: { protein: 0.3, carbs: 0.5, fat: 0.1 }
+    micros: { caffeine: 120, potassium: 116 }
+    aliases: ["美式咖啡", "美式", "黑咖啡", "americano", "long black"]
+    # 一杯按 2 shots + 水，咖啡因约 120mg；单 shot 美式按 0.5 serving 记。
+
 routines:
   morning_stack:
     name: "晨补 (Morning Stack)"
@@ -355,8 +481,11 @@ routines:
     items:
       - { name: "辅酶Q10", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
       - { name: "B族维生素", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
+      - { name: "维生素C", calories: 0, macros: { carbs: 0, protein: 0, fat: 0 } }
       - { name: "鱼油", calories: 10, macros: { carbs: 0, protein: 0, fat: 1.1 } }
     # 鱼油早餐 1 粒（2026-10-26 从 2 粒下调，全天合计 600mg EPA+DHA）。
+    # 维生素C 2026-11-08 加入：汤臣倍健维C片早餐后 1 片（120mg）。
+    # 晚餐那片是「大跑量/关节高负荷日选加」，不进固定栈，需要时手工记。
     # D3+K2 已移出本段（2026-10-26）——它是隔天 1 粒，放进晨补会被每天多记一遍。
     # 现在走独立的 d3_k2_stack 段，由一条隔天的定时任务显式点名写入。
 
@@ -419,4 +548,29 @@ meal_combos:
         calories: 145
         macros: { protein: 4.5, carbs: 28.0, fat: 1.5 }
         micros: { fiber: 1.5, sodium: 250, iron: 5 }
+
+  # 中式套餐饭（食堂/快餐：几份小炒 + 一大碗杂粮饭）
+  # 必须走套餐声明值：USDA 只有生肉（猪肉里脊 143 kcal/100g）不含炒制用油，
+  # 且「杂粮饭」会被匹配到生米 368 kcal/100g，单项喂 USDA 会同时低估肉、高估饭。
+  zhongshi_taocan_fan:
+    name: "中式套餐饭 (小炒鸡肉+小炒猪肉+素小炒+一大碗杂粮饭)"
+    aliases: ["中式套餐饭", "套餐饭", "食堂套餐", "小炒套餐", "盖饭套餐"]
+    items:
+      - name: "杂粮饭 Mixed Grain Rice (一大碗约250g)"
+        calories: 330
+        macros: { protein: 7, carbs: 68, fat: 2.5 }
+        micros: { fiber: 3.5, sodium: 10, potassium: 200 }
+      - name: "小炒鸡肉 Stir-fried Chicken (约150g)"
+        calories: 260
+        macros: { protein: 22, carbs: 4, fat: 17 }
+        micros: { sodium: 480, potassium: 300, cholesterol: 95, saturated_fat: 4.5 }
+      - name: "小炒猪肉 Stir-fried Pork (约120g)"
+        calories: 280
+        macros: { protein: 14, carbs: 4, fat: 23 }
+        micros: { sodium: 450, potassium: 250, cholesterol: 70, saturated_fat: 8 }
+      - name: "素小炒 Stir-fried Vegetables (约150g)"
+        calories: 130
+        macros: { protein: 5, carbs: 8, fat: 9 }
+        micros: { fiber: 3, sodium: 400, potassium: 350, vitamin_c: 25, vitamin_a: 40 }
+    # 合计 1000 kcal / P48 C84 F51.5；按 P*4+C*4+F*9=991.5 校验，偏差 0.9%。
 
