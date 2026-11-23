@@ -13,7 +13,6 @@
     record_supplements.py dinner night            # 晚餐补剂 + 睡前补剂
     record_supplements.py morning --dry-run       # 只预览不写入
     record_supplements.py morning --date 2026-10-26
-    record_supplements.py workout --skip D3       # 训练包，跳过 D3+K2
 
 一条命令记完全天（合并定时任务用）::
 
@@ -22,7 +21,7 @@
 ``--every-other-day`` 让指定段按日期奇偶决定今天写不写，所以「每天跑一次」
 也能表达隔天节奏；非服用日只跳过该段，其余照常写入。
 
-段名: morning / dinner / night / workout / d3（也接受完整 key morning_stack 等）。
+段名: morning / dinner / night / d3（也接受完整 key morning_stack 等）。
 
 退出码: 0 = 成功（含「今天已记过，跳过」），1 = 失败，2 = 参数错误。
 """
@@ -43,12 +42,12 @@ import mfp_adapter  # noqa: E402  (必须在 sys.path 调整之后)
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="按段记录当天补剂（晨补 / 晚餐 / 睡前 / 训练包）",
+        description="按段记录当天补剂（晨补 / 晚餐 / 睡前 / D3+K2）",
     )
     parser.add_argument(
         "segments",
         nargs="+",
-        help="morning / dinner / night / workout / d3，或完整 key（morning_stack 等）",
+        help="morning / dinner / night / d3，或完整 key（morning_stack 等）",
     )
     parser.add_argument("--date", default=None, help="YYYY-MM-DD，默认今天")
     parser.add_argument("--dry-run", action="store_true", help="只预览不写入")
