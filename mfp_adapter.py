@@ -1855,13 +1855,12 @@ class MFPAdapter:
     def record_daily_supplements(
         self,
         date_str: str,
-        include_workout: bool = False,
         skip: list[str] | None = None,
         dry_run: bool = False,
         force: bool = False,
         segments: list[str] | None = None,
     ) -> str:
-        """把当日补剂按餐次一次记完（晨补 / 晚餐 / 睡前 / 可选训练包）。
+        """把当日补剂按餐次一次记完（晨补 / 晚餐 / 睡前）。
 
         ``segments`` 只写指定段（定时任务按作息逐段调用时用）；None 写全部。
         """
@@ -1872,9 +1871,6 @@ class MFPAdapter:
         only, segment_error = _resolve_segments(segments)
         if segment_error:
             return f"错误: {segment_error}"
-        # 显式点了训练包就不再要求 include_workout
-        if only and "workout_stack" in only:
-            include_workout = True
 
         resolved: dict[str, str] = {}
 
@@ -1898,7 +1894,6 @@ class MFPAdapter:
         plan = plan_daily_supplements(
             routines,
             resolve=resolve,
-            include_workout=include_workout,
             skip=skip,
             logged=logged,
             logged_anywhere=logged_anywhere,
@@ -2471,12 +2466,11 @@ def _meal_time_warnings(date_str: str, meal_type: str) -> list[str]:
         )
     return warnings
 
-# 全天补剂 = 这四段，顺序即为写入顺序
+# 全天补剂 = 这三段，顺序即为写入顺序
 DAILY_SUPPLEMENT_SEGMENTS: tuple[tuple[str, str], ...] = (
     ("morning_stack", "breakfast"),
     ("dinner_stack", "dinner"),
     ("night_stack", "snack"),
-    ("workout_stack", "snack"),
 )
 # 额外段：**不进「全天补剂」组合**，只能在 segments 里显式点名才写。
 # 放的是「不是每天吃」的补剂——混进全天组合就会在不需要的日子多记一遍。
@@ -2494,7 +2488,6 @@ _SEGMENT_ALIASES: dict[str, str] = {
     "morning": "morning_stack",
     "dinner": "dinner_stack",
     "night": "night_stack",
-    "workout": "workout_stack",
     "d3": "d3_k2_stack",
     "d3k2": "d3_k2_stack",
 }
@@ -2502,7 +2495,6 @@ _SEGMENT_LABELS: dict[str, str] = {
     "morning_stack": "晨补",
     "dinner_stack": "晚餐补剂",
     "night_stack": "睡前补剂",
-    "workout_stack": "训练包",
     "d3_k2_stack": "D3+K2",
 }
 
@@ -2611,7 +2603,6 @@ def plan_daily_supplements(
     routines: dict[str, Any],
     *,
     resolve: Callable[[str], str],
-    include_workout: bool = False,
     skip: list[str] | None = None,
     logged: set[tuple[str, str]] | None = None,
     logged_anywhere: dict[str, str] | None = None,
@@ -2623,7 +2614,6 @@ def plan_daily_supplements(
     Args:
         routines: 配置里的 routines 节点。
         resolve: 把口语名解析成最终写入名（用于和 journal 比对）。
-        include_workout: 是否追加训练包（含乳清/牛奶，容易和练后正餐重复）。
         skip: 名称片段，命中即跳过（如 ["D3"] 跳过 D3+K2）。
         logged: 当日已写入的 (meal_name, 食物名) 集合；按餐次隔离，
             所以早餐鱼油不会影响晚餐鱼油。
@@ -2651,8 +2641,6 @@ def plan_daily_supplements(
 
     for routine_key, meal_type in ordered:
         if only is not None and routine_key not in only:
-            continue
-        if routine_key == "workout_stack" and not include_workout:
             continue
         routine = routines.get(routine_key)
         if not routine:
@@ -2772,7 +2760,6 @@ def record_nutrition(date: str, meal_type: str, items: list[Any]) -> str:
 @mcp.tool()
 def record_daily_supplements(
     date: str,
-    include_workout: bool = False,
     skip: list[str] | None = None,
     dry_run: bool = False,
     force: bool = False,
@@ -2783,8 +2770,7 @@ def record_daily_supplements(
     一次调用记完全天补剂，自动按餐次拆开写入。
 
     分段规则（顺序固定）:
-      晨补 → breakfast、晚餐补剂 → dinner、睡前补剂 → snack；
-      include_workout=True 时追加训练包 → snack。
+      晨补 → breakfast、晚餐补剂 → dinner、睡前补剂 → snack。
 
     幂等: 写入前比对本地 journal，**同一餐次**下已存在的同名条目自动跳过
     （早餐鱼油不会挡住晚餐鱼油）；需要重复记录时传 force=True。
@@ -2795,16 +2781,13 @@ def record_daily_supplements(
 
     Args:
         date (str): Date in YYYY-MM-DD format. | 日期 (YYYY-MM-DD)。
-        include_workout (bool): Also write the workout stack (beetroot + whey +
-            milk). Off by default — it overlaps with a real
-            post-workout meal. | 是否追加训练包，默认不记。
         skip (list[str] | None): Name fragments to skip, e.g. ["D3"] on a
             D3-off day, ["锌镁"] on a rest day. | 要跳过的名称片段。
         dry_run (bool): Only print what would be written. | 只预览不写入。
         force (bool): Ignore the journal and write again. | 忽略已记录检查。
         segments (list[str] | None): Only write these stacks, e.g. ["morning"].
-            Accepts morning / dinner / night / workout (or the full keys
-            morning_stack / dinner_stack / night_stack / workout_stack).
+            Accepts morning / dinner / night / d3 (or the full keys
+            morning_stack / dinner_stack / night_stack / d3_k2_stack).
             Omit for the whole day. Idempotency and cross-meal protection still
             apply. | 只写指定段，用于按作息分时段记录；留空写全天。
     """
@@ -2812,7 +2795,6 @@ def record_daily_supplements(
         mfp = get_adapter()
         return mfp.record_daily_supplements(
             date,
-            include_workout=include_workout,
             skip=skip,
             dry_run=dry_run,
             force=force,

@@ -20,6 +20,7 @@ DAILY_SUPPLEMENTS = [
     ("锌镁片", "诺特兰德", 4.8, {"magnesium": 265, "zinc": 10.5}),
     ("甜菜根冲剂", "Beetroot", 35.0, {"potassium": 250}),
     ("肌酸", "Creatine Monohydrate", 0.0, {}),
+    ("蛋白粉15g", "15g", 60.0, {"protein": 12}),
     ("维生素C", "汤臣倍健", 0.0, {"vitamin_c": 133.3}),
 ]
 
@@ -110,7 +111,7 @@ class TestEnglishAliasScope:
 
     两个真实事故：
     - ``Yogurt, plain, whole milk`` 里的 milk 命中牛奶条目，酸奶被记成 180 kcal
-    - 训练包的 ``Milk (Full Cream, 250ml)`` 被 300ml 条目覆盖，多记 30 kcal
+    - 晚餐段的 ``Milk (Full Cream, 250ml)`` 被 300ml 条目覆盖，多记 30 kcal
     """
 
     def test_milk_inside_yogurt_name_is_not_matched(self, real_adapter):
@@ -141,7 +142,7 @@ class TestEnglishAliasScope:
         assert item["calories"] == 180
 
     def test_whey_english_alias_hits_config_not_usda(self, real_adapter):
-        """训练包写英文 Whey Protein，缺别名会掉进 USDA 的 100g 口径（352 kcal）。"""
+        """手工写英文 Whey Protein，缺别名会掉进 USDA 的 100g 口径（352 kcal）。"""
         item = real_adapter._apply_config_safeguard({"name": "Whey Protein"})
 
         assert item.get("_config_matched") is True
