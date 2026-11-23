@@ -30,21 +30,18 @@ ROUTINES = {
     "dinner_stack": {
         "name": "晚餐补剂",
         "aliases": ["晚餐补剂"],
-        "items": [_item("Move Free"), {**_item("鱼油", 20.0, fat=2.2), "serving_ratio": 2}],
+        "items": [
+            _item("Move Free"),
+            {**_item("鱼油", 20.0, fat=2.2), "serving_ratio": 2},
+            _item("肌酸"),
+            _item("蛋白粉15g", 60.0, protein=12, carbs=1.5, fat=0.75),
+            _item("Milk (Full Cream, 250ml)", 150.0, protein=8, carbs=12, fat=8),
+        ],
     },
     "night_stack": {
         "name": "睡前补剂",
         "aliases": ["睡前补剂"],
         "items": [_item("锌镁片", 4.8, carbs=1.2)],
-    },
-    "workout_stack": {
-        "name": "训练日补剂",
-        "aliases": ["训练日补剂"],
-        "items": [
-            _item("甜菜根粉", 35.0, carbs=8),
-            _item("Whey Protein", 120.0, protein=24, carbs=3, fat=1.5),
-            _item("肌酸"),
-        ],
     },
     "d3_k2_stack": {
         "name": "D3+K2 隔天",
@@ -68,11 +65,13 @@ class TestPlanDailySupplements:
             ("night_stack", "snack"),
         ]
 
-    def test_include_workout_appends_a_snack_segment(self):
-        plan = _plan(include_workout=True)
+    def test_dinner_stacks_the_whole_mixed_drink(self):
+        plan = _plan()
 
-        assert plan["segments"][-1]["routine"] == "workout_stack"
-        assert plan["segments"][-1]["meal_type"] == "snack"
+        names = [item["name"] for item in plan["segments"][1]["items"]]
+        assert "肌酸" in names
+        assert "蛋白粉15g" in names
+        assert "Milk (Full Cream, 250ml)" in names
 
     def test_skip_token_drops_only_the_matching_item(self):
         plan = _plan(skip=["B族"])
@@ -102,15 +101,15 @@ class TestPlanDailySupplements:
 class TestCrossMealDuplicates:
     """跨餐次重复保护：只挡「全局只出现一次」的条目。
 
-    真实事故：午餐单独记了肌酸，再跑全天补剂（训练包也在写肌酸），一天记两次。
-    幂等键是 (餐次, 名称)，Snacks 与 Lunch 永不相等，所以同一餐次检查抓不到。
+    真实事故：午餐单独记了肌酸，再跑全天补剂（晚餐段也在写肌酸），一天记两次。
+    幂等键是 (餐次, 名称)，Dinner 与 Lunch 永不相等，所以同一餐次检查抓不到。
     """
 
     def test_single_dose_item_logged_elsewhere_is_skipped(self):
-        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Lunch"})
+        plan = _plan(logged_anywhere={"肌酸": "Lunch"})
 
-        workout = plan["segments"][-1]["items"]
-        assert "肌酸" not in [i["name"] for i in workout]
+        dinner = plan["segments"][1]["items"]
+        assert "肌酸" not in [i["name"] for i in dinner]
         assert plan["skipped_cross_meal"] == ["肌酸（已记在午餐）"]
 
     def test_multi_dose_item_is_never_cross_meal_skipped(self):
@@ -131,13 +130,13 @@ class TestCrossMealDuplicates:
         assert plan["skipped_cross_meal"] == []
 
     def test_force_ignores_cross_meal(self):
-        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Lunch"}, force=True)
+        plan = _plan(logged_anywhere={"肌酸": "Lunch"}, force=True)
 
-        assert "肌酸" in [i["name"] for i in plan["segments"][-1]["items"]]
+        assert "肌酸" in [i["name"] for i in plan["segments"][1]["items"]]
         assert plan["skipped_cross_meal"] == []
 
     def test_unknown_meal_name_falls_back_to_raw(self):
-        plan = _plan(include_workout=True, logged_anywhere={"肌酸": "Brunch"})
+        plan = _plan(logged_anywhere={"肌酸": "Brunch"})
 
         assert plan["skipped_cross_meal"] == ["肌酸（已记在Brunch）"]
 
@@ -168,7 +167,16 @@ class TestRecordDailySupplements:
                 "timestamp": "2026-10-24T19:00:00",
                 "date": "2026-10-24",
                 "meal_name": "Dinner",
-                "items": [{"name": n} for n in ("Move Free", "鱼油")],
+                "items": [
+                    {"name": n}
+                    for n in (
+                        "Move Free",
+                        "鱼油",
+                        "肌酸",
+                        "蛋白粉15g",
+                        "Milk (Full Cream, 250ml)",
+                    )
+                ],
             },
             {
                 "timestamp": "2026-10-24T22:00:00",
@@ -190,15 +198,17 @@ class TestRecordDailySupplements:
 
         calls = adapter.record_nutrition.call_args_list
         assert [c.args[1] for c in calls] == ["breakfast", "dinner", "snack"]
-        assert [len(c.args[2]) for c in calls] == [3, 2, 1]
-        assert "6 条" in output
+        assert [len(c.args[2]) for c in calls] == [3, 5, 1]
+        assert "9 条" in output
 
-    def test_include_workout_writes_a_fourth_segment(self, adapter):
-        adapter.record_daily_supplements("2026-10-24", include_workout=True)
+    def test_dinner_writes_creatine_whey_and_milk_together(self, adapter):
+        adapter.record_daily_supplements("2026-10-24")
 
-        calls = adapter.record_nutrition.call_args_list
-        assert [c.args[1] for c in calls] == ["breakfast", "dinner", "snack", "snack"]
-        assert calls[-1].args[2][0]["name"] == "甜菜根粉"
+        dinner = adapter.record_nutrition.call_args_list[1].args[2]
+        names = [item["name"] for item in dinner]
+        assert "肌酸" in names
+        assert "蛋白粉15g" in names
+        assert "Milk (Full Cream, 250ml)" in names
 
     def test_second_run_skips_everything_already_logged(self, adapter):
         self._seed_full_day(adapter)
@@ -277,7 +287,7 @@ class TestRecordDailySupplements:
         assert "1 段写入失败" in output
 
     def test_cross_meal_duplicate_is_skipped_and_reported(self, adapter):
-        """午餐单独记过肌酸，训练包里的那份必须跳过（否则一天记两次）。"""
+        """午餐单独记过肌酸，晚餐段那份必须跳过（否则一天记两次）。"""
         adapter._write_journal([
             {
                 "timestamp": "2026-10-24T12:00:00",
@@ -287,10 +297,10 @@ class TestRecordDailySupplements:
             },
         ])
 
-        output = adapter.record_daily_supplements("2026-10-24", include_workout=True)
+        output = adapter.record_daily_supplements("2026-10-24")
 
-        workout_items = adapter.record_nutrition.call_args_list[-1].args[2]
-        assert "肌酸" not in [item["name"] for item in workout_items]
+        dinner_items = adapter.record_nutrition.call_args_list[1].args[2]
+        assert "肌酸" not in [item["name"] for item in dinner_items]
         assert "其他餐次" in output
         assert "肌酸（已记在午餐）" in output
 
@@ -304,10 +314,10 @@ class TestRecordDailySupplements:
             },
         ])
 
-        adapter.record_daily_supplements("2026-10-24", include_workout=True, force=True)
+        adapter.record_daily_supplements("2026-10-24", force=True)
 
-        workout_items = adapter.record_nutrition.call_args_list[-1].args[2]
-        assert "肌酸" in [item["name"] for item in workout_items]
+        dinner_items = adapter.record_nutrition.call_args_list[1].args[2]
+        assert "肌酸" in [item["name"] for item in dinner_items]
 
     def test_multi_dose_item_survives_a_cross_meal_hit(self, adapter):
         """鱼油早餐+晚餐各一份是设计如此，别处记过也不能跳过。"""
@@ -337,7 +347,6 @@ class TestResolveSegments:
             (["morning"], {"morning_stack"}),
             (["dinner"], {"dinner_stack"}),
             (["night"], {"night_stack"}),
-            (["workout"], {"workout_stack"}),
             (["night_stack"], {"night_stack"}),
             (["d3"], {"d3_k2_stack"}),
             (["d3k2"], {"d3_k2_stack"}),
@@ -362,6 +371,13 @@ class TestResolveSegments:
         assert error is not None
         assert "mornin" in error
         assert "morning" in error
+
+    def test_workout_is_an_unknown_segment_now(self):
+        keys, error = mfp_adapter._resolve_segments(["workout"])
+
+        assert keys is None
+        assert error is not None
+        assert "workout" in error
 
 
 class TestEveryOtherDay:
@@ -504,7 +520,7 @@ class TestPlanOnlySegments:
     def test_only_none_keeps_all_default_segments(self):
         assert len(_plan(only=None)["segments"]) == 3
 
-    def test_only_workout_still_requires_include_workout(self):
+    def test_only_unknown_key_produces_no_segments(self):
         assert _plan(only={"workout_stack"})["segments"] == []
 
     def test_multi_dose_item_is_not_blocked_when_scoped(self):
@@ -562,12 +578,12 @@ class TestSegmentScopedWrite:
         assert output.startswith("错误")
         assert "mornin" in output
 
-    def test_workout_segment_implies_include_workout(self, adapter):
-        adapter.record_daily_supplements("2026-10-24", segments=["workout"])
+    def test_workout_segment_returns_error_without_writing(self, adapter):
+        output = adapter.record_daily_supplements("2026-10-24", segments=["workout"])
 
-        assert adapter.record_nutrition.call_count == 1
-        names = [item["name"] for item in adapter.record_nutrition.call_args.args[2]]
-        assert "Whey Protein" in names
+        adapter.record_nutrition.assert_not_called()
+        assert output.startswith("错误")
+        assert "workout" in output
 
     def test_segments_can_be_combined(self, adapter):
         adapter.record_daily_supplements("2026-10-24", segments=["dinner", "night"])
@@ -620,13 +636,12 @@ class TestToolWrapper:
         monkeypatch.setattr(mfp_adapter, "get_adapter", lambda: fake)
 
         output = mfp_adapter.record_daily_supplements(
-            "2026-10-24", include_workout=True, skip=["D3"], dry_run=True
+            "2026-10-24", skip=["D3"], dry_run=True
         )
 
         assert output == "已记录"
         fake.record_daily_supplements.assert_called_once_with(
             "2026-10-24",
-            include_workout=True,
             skip=["D3"],
             dry_run=True,
             force=False,
