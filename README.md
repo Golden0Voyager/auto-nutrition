@@ -43,7 +43,7 @@
 | 工具 | 用途 |
 | :--- | :--- |
 | `record_nutrition` | 录入食物/补剂到指定日期与餐次（支持字符串或结构化对象） |
-| `record_daily_supplements` | 一键记完全天补剂：按餐次拆成早餐/晚餐/加餐写入，同餐同名自动跳过；支持 `skip`/`dry_run`/`include_workout` |
+| `record_daily_supplements` | 一键记完全天补剂：按餐次拆成早餐/晚餐/加餐写入，同餐同名自动跳过；支持 `skip`/`dry_run`/`segments` |
 | `record_meal` | 把 MFP 自定义套餐（My Meals）整体写入某一餐；传 meal_id 或套餐名（支持模糊匹配，歧义时返回候选） |
 | `list_my_meals` | 列出 MFP 账号里的自定义套餐（meal_id / 食物数 / 总热量） |
 | `get_daily_summary` | 当日预算总结：热量/蛋白/碳水/脂肪缺口 + 钠/糖/饮水/运动/步数 |
